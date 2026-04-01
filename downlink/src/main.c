@@ -21,6 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "debug_log.h"
 
 /* USER CODE END Includes */
 
@@ -125,6 +126,7 @@ int main(void)
   MX_USART3_UART_Init();
   MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
+  DEBUG_PRINTF("[downlink] init complete\r\n");
 
   /* USER CODE END 2 */
 
