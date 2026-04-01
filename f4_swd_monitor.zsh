@@ -1,16 +1,4 @@
-[env:genericSTM32F446RE]
-platform = ststm32
-board = genericSTM32F446RE
-framework = stm32cube
-
-; change microcontroller
-board_build.mcu = stm32f446ret6
-
-; change MCU frequency
-board_build.f_cpu = 180000000L
-
-upload_protocol = stlink
-[22:23]#!/usr/bin/env zsh
+#!/usr/bin/env zsh
 set -euo pipefail
 
 # ソースコードに記述したprintfの出力を表示するためのスクリプト
@@ -21,7 +9,7 @@ set -euo pipefail
 OPENOCD_CMD=(
   openocd -f interface/stlink.cfg -f target/stm32f4x.cfg \
     -c "init" \
-    -c "stm32f4x.tpiu configure -protocol uart -traceclk 168000000 -pin-freq 1000000 -output :3344 -formatter off" \
+    -c "stm32f4x.tpiu configure -protocol uart -traceclk 16000000 -pin-freq 1000000 -output :3344 -formatter off" \
     -c "itm ports on" \
     -c "stm32f4x.tpiu enable" \
     -c "reset run"
