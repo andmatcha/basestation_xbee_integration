@@ -4,8 +4,13 @@
 #include "main.h"
 #include "modules/input_source_selector.h"
 
+#include <stdbool.h>
 #include <string.h>
 
+#define ROVER_OUT_UART      huart1
+#define ARM_OUT_UART        huart2
+#define USB_IN_UART         huart3
+#define XBEE_IN_UART        huart6
 #define ROVER_PACKET_MAX_LEN 64U
 #define ARM_PACKET_JF_SIZE   16U
 
@@ -40,9 +45,52 @@ extern UART_HandleTypeDef huart2;
 extern UART_HandleTypeDef huart3;
 extern UART_HandleTypeDef huart6;
 
-static void start_receive_it(UART_HandleTypeDef *huart, uint8_t *rx_char)
+static uint32_t enter_critical_section(void)
 {
-    if (HAL_UART_Receive_IT(huart, rx_char, 1U) != HAL_OK) {
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    return primask;
+}
+
+static void exit_critical_section(uint32_t primask)
+{
+    if (primask == 0U) {
+        __enable_irq();
+    }
+}
+
+static uint8_t *get_rx_char_slot(UART_HandleTypeDef *huart)
+{
+    if (huart == &USB_IN_UART) {
+        return &g_data_router.usb_rx_char;
+    }
+
+    if (huart == &XBEE_IN_UART) {
+        return &g_data_router.xbee_rx_char;
+    }
+
+    return NULL;
+}
+
+static void restart_receive_it(UART_HandleTypeDef *huart)
+{
+    uint8_t *rx_char = get_rx_char_slot(huart);
+    HAL_StatusTypeDef status;
+
+    if (rx_char == NULL) {
+        return;
+    }
+
+    status = HAL_UART_Receive_IT(huart, rx_char, 1U);
+    if (status == HAL_BUSY) {
+        if (HAL_UART_AbortReceive(huart) != HAL_OK) {
+            Error_Handler();
+        }
+
+        status = HAL_UART_Receive_IT(huart, rx_char, 1U);
+    }
+
+    if (status != HAL_OK) {
         Error_Handler();
     }
 }
@@ -58,15 +106,17 @@ static void reset_stream_parser(void)
 static void sync_active_input_uart(bool log_change)
 {
     UART_HandleTypeDef *active_uart = downlink_input_source_get_active_uart();
+    bool changed = false;
+    uint32_t primask = enter_critical_section();
 
-    if (g_data_router.active_input_uart == active_uart) {
-        return;
+    if (g_data_router.active_input_uart != active_uart) {
+        g_data_router.active_input_uart = active_uart;
+        reset_stream_parser();
+        changed = true;
     }
+    exit_critical_section(primask);
 
-    g_data_router.active_input_uart = active_uart;
-    reset_stream_parser();
-
-    if (log_change) {
+    if (changed && log_change) {
         LOG("[downlink] router input -> %s\r\n",
             downlink_input_source_get_current_name());
     }
@@ -80,15 +130,15 @@ static void send_rover_packet(const uint8_t *packet, uint16_t length)
         return;
     }
 
-    HAL_UART_Transmit(&huart1, (uint8_t *)packet, length, HAL_MAX_DELAY);
-    HAL_UART_Transmit(&huart1, (uint8_t *)line_ending, sizeof(line_ending) - 1U,
+    HAL_UART_Transmit(&ROVER_OUT_UART, (uint8_t *)packet, length, HAL_MAX_DELAY);
+    HAL_UART_Transmit(&ROVER_OUT_UART, (uint8_t *)line_ending, sizeof(line_ending) - 1U,
                       HAL_MAX_DELAY);
     LOG("[downlink] rover tx %u bytes\r\n", length);
 }
 
 static void send_arm_packet(const uint8_t *packet)
 {
-    HAL_UART_Transmit(&huart2, (uint8_t *)packet, ARM_PACKET_JF_SIZE,
+    HAL_UART_Transmit(&ARM_OUT_UART, (uint8_t *)packet, ARM_PACKET_JF_SIZE,
                       HAL_MAX_DELAY);
     LOG("[downlink] arm tx %u bytes\r\n", ARM_PACKET_JF_SIZE);
 }
@@ -176,8 +226,8 @@ void data_router_init(void)
     memset(&g_data_router, 0, sizeof(g_data_router));
     sync_active_input_uart(true);
 
-    start_receive_it(&huart3, &g_data_router.usb_rx_char);
-    start_receive_it(&huart6, &g_data_router.xbee_rx_char);
+    restart_receive_it(&USB_IN_UART);
+    restart_receive_it(&XBEE_IN_UART);
 }
 
 void data_router_poll(void)
@@ -187,10 +237,11 @@ void data_router_poll(void)
     uint16_t rover_packet_len = 0U;
     bool has_arm_packet = false;
     bool has_rover_packet = false;
+    uint32_t primask;
 
     sync_active_input_uart(true);
 
-    __disable_irq();
+    primask = enter_critical_section();
     if (g_data_router.arm_packet_pending) {
         memcpy(arm_packet, g_data_router.arm_packet_buf, sizeof(arm_packet));
         g_data_router.arm_packet_pending = false;
@@ -199,11 +250,14 @@ void data_router_poll(void)
 
     if (g_data_router.rover_packet_pending) {
         rover_packet_len = g_data_router.rover_packet_len;
+        if (rover_packet_len > ROVER_PACKET_MAX_LEN) {
+            rover_packet_len = ROVER_PACKET_MAX_LEN;
+        }
         memcpy(rover_packet, g_data_router.rover_packet_buf, rover_packet_len);
         g_data_router.rover_packet_pending = false;
         has_rover_packet = true;
     }
-    __enable_irq();
+    exit_critical_section(primask);
 
     if (has_arm_packet) {
         send_arm_packet(arm_packet);
@@ -216,18 +270,15 @@ void data_router_poll(void)
 
 void data_router_on_uart_rx_complete(UART_HandleTypeDef *huart)
 {
+    uint8_t *rx_char = get_rx_char_slot(huart);
     uint8_t received_byte;
 
-    if (huart == &huart3) {
-        received_byte = g_data_router.usb_rx_char;
-        start_receive_it(&huart3, &g_data_router.usb_rx_char);
-    } else if (huart == &huart6) {
-        received_byte = g_data_router.xbee_rx_char;
-        start_receive_it(&huart6, &g_data_router.xbee_rx_char);
-    } else {
+    if (rx_char == NULL) {
         return;
     }
 
+    received_byte = *rx_char;
+    restart_receive_it(huart);
     sync_active_input_uart(false);
 
     if (!downlink_input_source_is_selected_uart(huart)) {
@@ -235,4 +286,20 @@ void data_router_on_uart_rx_complete(UART_HandleTypeDef *huart)
     }
 
     filter_input_byte(received_byte);
+}
+
+void data_router_on_uart_error(UART_HandleTypeDef *huart)
+{
+    if (get_rx_char_slot(huart) == NULL) {
+        return;
+    }
+
+    LOG("[downlink] uart error on %s\r\n",
+        (huart == &USB_IN_UART) ? "USB IN (USART3)" : "XBee IN (USART6)");
+
+    if (HAL_UART_AbortReceive(huart) != HAL_OK) {
+        Error_Handler();
+    }
+
+    restart_receive_it(huart);
 }
