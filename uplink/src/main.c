@@ -21,7 +21,11 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <stdio.h>
+#include "stdbool.h"
+#include "string.h"
+#include "stdio.h"
+#include "stdlib.h"
+#include "stddef.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -31,12 +35,17 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define UPLINK_TX_UART_HANDLE huart6
+#define ROVER_DMA_RX_BUFFER_SIZE 256U
+#define ARM_DMA_RX_BUFFER_SIZE 256U
+#define ROVER_LINE_MAX_LEN 96U
+#define UPLINK_TX_QUEUE_DEPTH 16U
+#define UPLINK_TX_FRAME_MAX_LEN 128U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+#define DEBUG_LOG(fmt, ...) printf("[DBG] " fmt "\r\n", ##__VA_ARGS__)
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -62,7 +71,58 @@ DMA_HandleTypeDef hdma_usart6_rx;
 DMA_HandleTypeDef hdma_usart6_tx;
 
 /* USER CODE BEGIN PV */
+typedef struct __attribute__((packed)) {
+    char     header[2];   // "AC"
+    uint8_t  seq;         // シーケンス番号        [ 1 byte ]
+    uint8_t  flags;       // フラグ (bit4-5: mode) [ 1 byte ]
+    uint16_t current[7];  // 電流値 x7             [14 bytes]
+    uint16_t angle[3];    // 角度   x3             [ 6 bytes]
+    int16_t  vel[3];      // 速度   x3             [ 6 bytes]
+    uint8_t control_byte; // 1 byte
+    int16_t base_rel_mm_j0; // 2 bytes
+    uint16_t auto_flags; // 2 bytes
+    uint16_t fault_code; // 2 bytes
+    uint16_t crc16; // 2 bytes
+} PacketAC_v6;            // 合計 39 bytes
 
+typedef struct {
+    uint8_t data[UPLINK_TX_FRAME_MAX_LEN];
+    uint16_t len;
+} UplinkTxFrame;
+
+typedef enum {
+    ARM_SYNC_WAIT_A = 0,
+    ARM_SYNC_WAIT_C,
+    ARM_SYNC_COLLECT_PAYLOAD,
+} ArmRxState;
+
+static uint8_t rover_dma_rx_buffer[ROVER_DMA_RX_BUFFER_SIZE];
+static uint16_t rover_dma_last_pos = 0;
+static char rover_line_buffer[ROVER_LINE_MAX_LEN];
+static uint16_t rover_line_index = 0;
+static bool rover_line_overflow = false;
+static uint32_t rover_dma_chunk_count = 0U;
+static uint32_t rover_raw_byte_count = 0U;
+
+static uint8_t arm_dma_rx_buffer[ARM_DMA_RX_BUFFER_SIZE];
+static uint16_t arm_dma_last_pos = 0;
+static uint8_t arm_packet_buffer[sizeof(PacketAC_v6)];
+static uint16_t arm_packet_index = 0;
+static ArmRxState arm_rx_state = ARM_SYNC_WAIT_A;
+static uint32_t arm_dma_chunk_count = 0U;
+static uint32_t arm_raw_byte_count = 0U;
+
+static UplinkTxFrame uplink_tx_queue[UPLINK_TX_QUEUE_DEPTH];
+static volatile uint16_t uplink_tx_head = 0;
+static volatile uint16_t uplink_tx_tail = 0;
+static volatile uint16_t uplink_tx_count = 0;
+static volatile bool uplink_tx_busy = false;
+static uint8_t uplink_tx_dma_buffer[UPLINK_TX_FRAME_MAX_LEN];
+static uint32_t rover_valid_line_count = 0U;
+static uint32_t rover_invalid_line_count = 0U;
+static uint32_t arm_valid_packet_count = 0U;
+static uint32_t arm_invalid_packet_count = 0U;
+static uint32_t uplink_enqueue_drop_count = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -78,7 +138,26 @@ static void MX_USART2_UART_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USART6_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+static HAL_StatusTypeDef startCircularReception(UART_HandleTypeDef *huart, uint8_t *buffer, uint16_t size);
+static void restartCircularReception(UART_HandleTypeDef *huart, uint8_t *buffer, uint16_t size);
+static void pollRoverDmaRx(void);
+static void pollArmDmaRx(void);
+static void consumeRoverByte(uint8_t byte);
+static void consumeArmByte(uint8_t byte);
+static bool validateRoverLine(const char *line);
+static bool validateArmPacket(const uint8_t *raw_packet);
+static uint16_t crc16_ccitt_false(const uint8_t* data, size_t len);
+static bool enqueueUplinkFrame(const uint8_t *data, uint16_t len);
+static void pumpUplinkTx(void);
+static const char *uartName(const UART_HandleTypeDef *huart);
+static void logArmPacketSummary(const uint8_t *raw_packet);
+static void logRxChunk(const char *label,
+                       const uint8_t *buffer,
+                       uint16_t start_pos,
+                       uint16_t end_pos,
+                       uint16_t buffer_size,
+                       uint32_t *chunk_count,
+                       uint32_t *byte_count);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -94,7 +173,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-  printf("Hello, world!\n");
+  printf("[BOOT] main entered\r\n");
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -125,7 +204,15 @@ int main(void)
   MX_USART3_UART_Init();
   MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
+  DEBUG_LOG("Peripherals initialized, starting DMA reception");
+  if (startCircularReception(&huart1, rover_dma_rx_buffer, sizeof(rover_dma_rx_buffer)) != HAL_OK) {
+    Error_Handler();
+  }
 
+  if (startCircularReception(&huart2, arm_dma_rx_buffer, sizeof(arm_dma_rx_buffer)) != HAL_OK) {
+    Error_Handler();
+  }
+  DEBUG_LOG("Initialization complete, entering main loop");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -133,7 +220,9 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
-
+    pollRoverDmaRx();
+    pollArmDmaRx();
+    pumpUplinkTx();
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
@@ -430,7 +519,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
+  huart2.Init.BaudRate = 57600;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -496,7 +585,7 @@ static void MX_USART6_UART_Init(void)
 
   /* USER CODE END USART6_Init 1 */
   huart6.Instance = USART6;
-  huart6.Init.BaudRate = 115200;
+  huart6.Init.BaudRate = 57600;
   huart6.Init.WordLength = UART_WORDLENGTH_8B;
   huart6.Init.StopBits = UART_STOPBITS_1;
   huart6.Init.Parity = UART_PARITY_NONE;
@@ -590,7 +679,471 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+static const char *uartName(const UART_HandleTypeDef *huart)
+{
+    if (huart == &huart1) {
+        return "USART1";
+    }
 
+    if (huart == &huart2) {
+        return "USART2";
+    }
+
+    if (huart == &huart3) {
+        return "USART3";
+    }
+
+    if (huart == &huart4) {
+        return "UART4";
+    }
+
+    if (huart == &huart6) {
+        return "USART6";
+    }
+
+    return "UNKNOWN";
+}
+
+static void logArmPacketSummary(const uint8_t *raw_packet)
+{
+    PacketAC_v6 packet;
+
+    memcpy(&packet, raw_packet, sizeof(packet));
+    DEBUG_LOG("Arm packet ok #%lu: seq=%u flags=0x%02X ctrl=0x%02X fault=0x%04X crc=0x%04X",
+              (unsigned long)arm_valid_packet_count,
+              packet.seq,
+              packet.flags,
+              packet.control_byte,
+              packet.fault_code,
+              packet.crc16);
+}
+
+static void logRxChunk(const char *label,
+                       const uint8_t *buffer,
+                       uint16_t start_pos,
+                       uint16_t end_pos,
+                       uint16_t buffer_size,
+                       uint32_t *chunk_count,
+                       uint32_t *byte_count)
+{
+    uint16_t chunk_size;
+    uint16_t last_pos;
+    uint8_t first_byte;
+    uint8_t last_byte;
+
+    if (start_pos == end_pos) {
+        return;
+    }
+
+    if (end_pos > start_pos) {
+        chunk_size = (uint16_t)(end_pos - start_pos);
+    } else {
+        chunk_size = (uint16_t)((buffer_size - start_pos) + end_pos);
+    }
+
+    first_byte = buffer[start_pos];
+    last_pos = (end_pos == 0U) ? (uint16_t)(buffer_size - 1U) : (uint16_t)(end_pos - 1U);
+    last_byte = buffer[last_pos];
+
+    (*chunk_count)++;
+    *byte_count += chunk_size;
+
+    if (*chunk_count <= 8U || ((*chunk_count % 32U) == 0U)) {
+        DEBUG_LOG("%s raw chunk #%lu: bytes=%u total=%lu first=0x%02X last=0x%02X pos=%u->%u",
+                  label,
+                  (unsigned long)*chunk_count,
+                  (unsigned int)chunk_size,
+                  (unsigned long)*byte_count,
+                  first_byte,
+                  last_byte,
+                  (unsigned int)start_pos,
+                  (unsigned int)end_pos);
+    }
+}
+
+static HAL_StatusTypeDef startCircularReception(UART_HandleTypeDef *huart, uint8_t *buffer, uint16_t size)
+{
+    HAL_StatusTypeDef status = HAL_UART_Receive_DMA(huart, buffer, size);
+
+    if (status == HAL_OK) {
+        __HAL_DMA_DISABLE_IT(huart->hdmarx, DMA_IT_HT);
+        __HAL_DMA_DISABLE_IT(huart->hdmarx, DMA_IT_TC);
+        DEBUG_LOG("DMA RX started on %s, buffer=%u bytes", uartName(huart), (unsigned int)size);
+    } else {
+        DEBUG_LOG("DMA RX start failed on %s, status=%d", uartName(huart), (int)status);
+    }
+
+    return status;
+}
+
+static void restartCircularReception(UART_HandleTypeDef *huart, uint8_t *buffer, uint16_t size)
+{
+    HAL_StatusTypeDef stop_status = HAL_UART_DMAStop(huart);
+
+    DEBUG_LOG("Restarting DMA RX on %s", uartName(huart));
+    if (stop_status != HAL_OK) {
+        DEBUG_LOG("HAL_UART_DMAStop returned %d on %s", (int)stop_status, uartName(huart));
+    }
+
+    if (startCircularReception(huart, buffer, size) != HAL_OK) {
+        Error_Handler();
+    }
+}
+
+static void pollRoverDmaRx(void)
+{
+    uint16_t start_pos = rover_dma_last_pos;
+    uint16_t dma_pos = (uint16_t)(sizeof(rover_dma_rx_buffer) - __HAL_DMA_GET_COUNTER(huart1.hdmarx));
+
+    logRxChunk("USART1", rover_dma_rx_buffer, start_pos, dma_pos, sizeof(rover_dma_rx_buffer),
+               &rover_dma_chunk_count, &rover_raw_byte_count);
+
+    while (rover_dma_last_pos != dma_pos) {
+        consumeRoverByte(rover_dma_rx_buffer[rover_dma_last_pos]);
+        rover_dma_last_pos++;
+        if (rover_dma_last_pos >= sizeof(rover_dma_rx_buffer)) {
+            rover_dma_last_pos = 0;
+        }
+    }
+}
+
+static void pollArmDmaRx(void)
+{
+    uint16_t start_pos = arm_dma_last_pos;
+    uint16_t dma_pos = (uint16_t)(sizeof(arm_dma_rx_buffer) - __HAL_DMA_GET_COUNTER(huart2.hdmarx));
+
+    logRxChunk("USART2", arm_dma_rx_buffer, start_pos, dma_pos, sizeof(arm_dma_rx_buffer),
+               &arm_dma_chunk_count, &arm_raw_byte_count);
+
+    while (arm_dma_last_pos != dma_pos) {
+        consumeArmByte(arm_dma_rx_buffer[arm_dma_last_pos]);
+        arm_dma_last_pos++;
+        if (arm_dma_last_pos >= sizeof(arm_dma_rx_buffer)) {
+            arm_dma_last_pos = 0;
+        }
+    }
+}
+
+static void consumeRoverByte(uint8_t byte)
+{
+    uint8_t tx_frame[ROVER_LINE_MAX_LEN + 2U];
+
+    if (byte == '\r') {
+        return;
+    }
+
+    if (byte == '\n') {
+        if (rover_line_overflow) {
+            DEBUG_LOG("Rover line dropped after overflow");
+            rover_line_index = 0;
+            rover_line_overflow = false;
+            return;
+        }
+
+        if (rover_line_index == 0U) {
+            return;
+        }
+
+        rover_line_buffer[rover_line_index] = '\0';
+        if (validateRoverLine(rover_line_buffer)) {
+            rover_valid_line_count++;
+            DEBUG_LOG("Rover line ok #%lu: %s", (unsigned long)rover_valid_line_count, rover_line_buffer);
+            memcpy(tx_frame, rover_line_buffer, rover_line_index);
+            tx_frame[rover_line_index] = '\r';
+            tx_frame[rover_line_index + 1U] = '\n';
+            (void)enqueueUplinkFrame(tx_frame, (uint16_t)(rover_line_index + 2U));
+        } else {
+            rover_invalid_line_count++;
+            DEBUG_LOG("Rover line rejected #%lu: %s", (unsigned long)rover_invalid_line_count, rover_line_buffer);
+        }
+        rover_line_index = 0;
+        return;
+    }
+
+    if (rover_line_overflow) {
+        return;
+    }
+
+    if (rover_line_index >= (ROVER_LINE_MAX_LEN - 1U)) {
+        rover_line_index = 0;
+        rover_line_overflow = true;
+        DEBUG_LOG("Rover line overflow, dropping until newline");
+        return;
+    }
+
+    rover_line_buffer[rover_line_index++] = (char)byte;
+}
+
+static void consumeArmByte(uint8_t byte)
+{
+    DEBUG_LOG("USART2 byte=0x%02X", byte);
+    switch (arm_rx_state) {
+    case ARM_SYNC_WAIT_A:
+        if (byte == 'A') {
+            arm_packet_buffer[0] = byte;
+            arm_packet_index = 1U;
+            arm_rx_state = ARM_SYNC_WAIT_C;
+        }
+        break;
+
+    case ARM_SYNC_WAIT_C:
+        if (byte == 'C') {
+            arm_packet_buffer[1] = byte;
+            arm_packet_index = 2U;
+            arm_rx_state = ARM_SYNC_COLLECT_PAYLOAD;
+        } else if (byte == 'A') {
+            arm_packet_buffer[0] = byte;
+            arm_packet_index = 1U;
+        } else {
+            arm_packet_index = 0U;
+            arm_rx_state = ARM_SYNC_WAIT_A;
+        }
+        break;
+
+    case ARM_SYNC_COLLECT_PAYLOAD:
+        arm_packet_buffer[arm_packet_index++] = byte;
+        if (arm_packet_index >= sizeof(PacketAC_v6)) {
+            if (validateArmPacket(arm_packet_buffer)) {
+                arm_valid_packet_count++;
+                logArmPacketSummary(arm_packet_buffer);
+                (void)enqueueUplinkFrame(arm_packet_buffer, sizeof(PacketAC_v6));
+            }
+            arm_packet_index = 0U;
+            arm_rx_state = ARM_SYNC_WAIT_A;
+        }
+        break;
+
+    default:
+        arm_packet_index = 0U;
+        arm_rx_state = ARM_SYNC_WAIT_A;
+        break;
+    }
+}
+
+static bool validateRoverLine(const char *line)
+{
+    const char *p = line;
+    unsigned long can_id = 0UL;
+
+    if (p[0] != '0' || (p[1] != 'x' && p[1] != 'X')) {
+        return false;
+    }
+
+    p += 2;
+    if (*p == '\0') {
+        return false;
+    }
+
+    while (*p != '\0' && *p != ',') {
+        char c = *p;
+        if (c >= '0' && c <= '9') {
+            can_id = (can_id * 16UL) + (unsigned long)(c - '0');
+        } else if (c >= 'A' && c <= 'F') {
+            can_id = (can_id * 16UL) + (unsigned long)(c - 'A' + 10);
+        } else if (c >= 'a' && c <= 'f') {
+            can_id = (can_id * 16UL) + (unsigned long)(c - 'a' + 10);
+        } else {
+            return false;
+        }
+        p++;
+    }
+
+    if (*p != ',' || can_id > 0x7FFUL) {
+        return false;
+    }
+
+    p++;
+    if (*p == '-' || *p == '+') {
+        p++;
+    }
+    if (*p == '\0') {
+        return false;
+    }
+
+    while (*p != '\0') {
+        if (*p < '0' || *p > '9') {
+            return false;
+        }
+        p++;
+    }
+
+    return true;
+}
+
+static bool validateArmPacket(const uint8_t *raw_packet)
+{
+    PacketAC_v6 packet;
+    uint16_t crc_calc;
+
+    memcpy(&packet, raw_packet, sizeof(packet));
+    if (packet.header[0] != 'A' || packet.header[1] != 'C') {
+        arm_invalid_packet_count++;
+        DEBUG_LOG("Arm packet header mismatch #%lu: %02X %02X",
+                  (unsigned long)arm_invalid_packet_count,
+                  raw_packet[0],
+                  raw_packet[1]);
+        return false;
+    }
+
+    crc_calc = crc16_ccitt_false(raw_packet, offsetof(PacketAC_v6, crc16));
+    if (crc_calc != packet.crc16) {
+        arm_invalid_packet_count++;
+        DEBUG_LOG("Arm packet CRC mismatch #%lu: seq=%u calc=0x%04X recv=0x%04X",
+                  (unsigned long)arm_invalid_packet_count,
+                  packet.seq,
+                  crc_calc,
+                  packet.crc16);
+        return false;
+    }
+
+    return true;
+}
+
+static uint16_t crc16_ccitt_false(const uint8_t* data, size_t len)
+{
+    uint16_t crc = 0xFFFFU;
+
+    for (size_t i = 0; i < len; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (uint8_t j = 0; j < 8; j++) {
+            if ((crc & 0x8000U) != 0U) {
+                crc = (uint16_t)((crc << 1) ^ 0x1021U);
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+
+    return crc;
+}
+
+static bool enqueueUplinkFrame(const uint8_t *data, uint16_t len)
+{
+    uint32_t primask;
+    uint16_t tail;
+    uint16_t head_snapshot;
+    uint16_t tail_snapshot;
+
+    if (len == 0U || len > UPLINK_TX_FRAME_MAX_LEN) {
+        DEBUG_LOG("Uplink enqueue rejected: invalid len=%u", (unsigned int)len);
+        return false;
+    }
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+    if (uplink_tx_count >= UPLINK_TX_QUEUE_DEPTH) {
+        uplink_enqueue_drop_count++;
+        head_snapshot = uplink_tx_head;
+        tail_snapshot = uplink_tx_tail;
+        __set_PRIMASK(primask);
+        DEBUG_LOG("Uplink enqueue rejected #%lu: queue full len=%u head=%u tail=%u",
+                  (unsigned long)uplink_enqueue_drop_count,
+                  (unsigned int)len,
+                  (unsigned int)head_snapshot,
+                  (unsigned int)tail_snapshot);
+        return false;
+    }
+
+    tail = uplink_tx_tail;
+    memcpy(uplink_tx_queue[tail].data, data, len);
+    uplink_tx_queue[tail].len = len;
+    uplink_tx_tail = (uint16_t)((tail + 1U) % UPLINK_TX_QUEUE_DEPTH);
+    uplink_tx_count++;
+    __set_PRIMASK(primask);
+    return true;
+}
+
+static void pumpUplinkTx(void)
+{
+    uint32_t primask;
+    uint16_t len;
+    uint16_t queued_count;
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+    if (uplink_tx_busy || uplink_tx_count == 0U) {
+        __set_PRIMASK(primask);
+        return;
+    }
+
+    len = uplink_tx_queue[uplink_tx_head].len;
+    queued_count = uplink_tx_count;
+    memcpy(uplink_tx_dma_buffer, uplink_tx_queue[uplink_tx_head].data, len);
+    uplink_tx_busy = true;
+    __set_PRIMASK(primask);
+
+    DEBUG_LOG("Uplink TX start: len=%u queued=%u first=0x%02X second=0x%02X",
+              (unsigned int)len,
+              (unsigned int)queued_count,
+              uplink_tx_dma_buffer[0],
+              (len > 1U) ? uplink_tx_dma_buffer[1] : 0U);
+
+    if (HAL_UART_Transmit_DMA(&UPLINK_TX_UART_HANDLE, uplink_tx_dma_buffer, len) != HAL_OK) {
+        primask = __get_PRIMASK();
+        __disable_irq();
+        uplink_tx_busy = false;
+        __set_PRIMASK(primask);
+        DEBUG_LOG("Uplink TX DMA start failed");
+    }
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+    uint32_t primask;
+
+    if (huart != &UPLINK_TX_UART_HANDLE) {
+        return;
+    }
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+    if (uplink_tx_count > 0U) {
+        uplink_tx_head = (uint16_t)((uplink_tx_head + 1U) % UPLINK_TX_QUEUE_DEPTH);
+        uplink_tx_count--;
+    }
+    uplink_tx_busy = false;
+    __set_PRIMASK(primask);
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    DEBUG_LOG("UART error on %s: code=0x%08lX",
+              uartName(huart),
+              (unsigned long)HAL_UART_GetError(huart));
+
+    if (huart == &huart1) {
+        rover_dma_last_pos = 0U;
+        rover_line_index = 0U;
+        rover_line_overflow = false;
+        restartCircularReception(&huart1, rover_dma_rx_buffer, sizeof(rover_dma_rx_buffer));
+        return;
+    }
+
+    if (huart == &huart2) {
+        arm_dma_last_pos = 0U;
+        arm_packet_index = 0U;
+        arm_rx_state = ARM_SYNC_WAIT_A;
+        restartCircularReception(&huart2, arm_dma_rx_buffer, sizeof(arm_dma_rx_buffer));
+        return;
+    }
+
+    if (huart == &UPLINK_TX_UART_HANDLE) {
+        (void)HAL_UART_DMAStop(huart);
+        uplink_tx_busy = false;
+    }
+}
+
+void send_xbee_int(uint16_t id, int value)
+{
+    char msg_uart[32];
+    int len = snprintf(msg_uart, sizeof(msg_uart), "0x%03X,%d\r\n", id, value);
+
+    if (len > 0) {
+        DEBUG_LOG("send_xbee_int: id=0x%03X value=%d", id, value);
+        (void)enqueueUplinkFrame((const uint8_t*)msg_uart, (uint16_t)len);
+        pumpUplinkTx();
+    }
+}
 /* USER CODE END 4 */
 
 /**
@@ -601,9 +1154,12 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
+  printf("[ERR] Error_Handler invoked\r\n");
+  NVIC_SystemReset();
   __disable_irq();
   while (1)
   {
+    
   }
   /* USER CODE END Error_Handler_Debug */
 }
