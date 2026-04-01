@@ -26,6 +26,10 @@ upload-downlink:
 list:
 	$(PIO) device list
 
+# ---------------- デバイス情報 ----------------
+info:
+	st-info --probe
+
 # ---------------- モニター ----------------
 monitor:
 	./f4_swd_monitor.zsh
