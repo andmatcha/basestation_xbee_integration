@@ -8,9 +8,9 @@
 #endif
 
 #if DEBUG_LOG_ENABLED
-#define DEBUG_PRINTF(...) do { printf(__VA_ARGS__); } while (0)
+#define LOG(...) do { printf(__VA_ARGS__); } while (0)
 #else
-#define DEBUG_PRINTF(...) do { } while (0)
+#define LOG(...) do { } while (0)
 #endif
 
 #endif /* DEBUG_LOG_H */
