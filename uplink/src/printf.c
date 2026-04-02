@@ -1,6 +1,7 @@
 #include "stm32f4xx.h"   // F446はCortex-M4
 #include <unistd.h>
 #include <sys/errno.h>
+
 static inline void itm_write_blocking(char ch)
 {
     if ((ITM->TCR & ITM_TCR_ITMENA_Msk) == 0U) return; // ITM未有効なら捨てる
@@ -8,6 +9,7 @@ static inline void itm_write_blocking(char ch)
     while (ITM->PORT[0].u32 == 0U) { __NOP(); }
     ITM_SendChar((uint32_t)ch);
 }
+
 int _write(int file, char *ptr, int len)
 {
     if (file == STDOUT_FILENO || file == STDERR_FILENO) {
