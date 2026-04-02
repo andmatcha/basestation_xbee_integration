@@ -3,6 +3,7 @@
 #include "debug_log.h"
 #include "main.h"
 #include "modules/input_source_selector.h"
+#include "modules/status_leds.h"
 
 #include <stdbool.h>
 #include <string.h>
@@ -285,6 +286,7 @@ void data_router_on_uart_rx_complete(UART_HandleTypeDef *huart)
         return;
     }
 
+    status_leds_on_rx_activity();
     filter_input_byte(received_byte);
 }
 
