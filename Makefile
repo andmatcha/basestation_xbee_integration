@@ -33,3 +33,10 @@ info:
 # ---------------- モニター ----------------
 monitor:
 	./f4_swd_monitor.zsh
+
+# ---------------- CubeMX生成コード->PlatformIO ----------------
+restructure-uplink:
+	cd ./uplink && ./restructure.sh
+
+restructure-downlink:
+	cd ./downlink && ./restructure.sh
