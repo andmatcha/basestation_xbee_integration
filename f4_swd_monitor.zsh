@@ -9,7 +9,7 @@ set -euo pipefail
 OPENOCD_CMD=(
   openocd -f interface/stlink.cfg -f target/stm32f4x.cfg \
     -c "init" \
-    -c "stm32f4x.tpiu configure -protocol uart -traceclk 168000000 -pin-freq 1000000 -output :3344 -formatter off" \
+    -c "stm32f4x.tpiu configure -protocol uart -traceclk 16000000 -pin-freq 1000000 -output :3344 -formatter off" \
     -c "itm ports on" \
     -c "stm32f4x.tpiu enable" \
     -c "reset run"

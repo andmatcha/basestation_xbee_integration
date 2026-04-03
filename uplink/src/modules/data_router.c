@@ -36,6 +36,7 @@ typedef struct
 {
     uint8_t data[UPLINK_TX_FRAME_MAX_LEN];
     uint16_t len;
+    uint8_t type;
 } UplinkTxFrame;
 
 typedef enum
@@ -44,6 +45,12 @@ typedef enum
     ARM_SYNC_WAIT_C,
     ARM_SYNC_COLLECT_PAYLOAD,
 } ArmRxState;
+
+typedef enum
+{
+    UPLINK_TX_FRAME_TYPE_ROVER = 0,
+    UPLINK_TX_FRAME_TYPE_ARM,
+} UplinkTxFrameType;
 
 typedef struct
 {
@@ -164,7 +171,7 @@ static void sync_active_output_uart(bool log_change)
     }
 }
 
-static bool enqueue_uplink_frame(const uint8_t *data, uint16_t len)
+static bool enqueue_uplink_frame(UplinkTxFrameType type, const uint8_t *data, uint16_t len)
 {
     UplinkTxFrame *frame;
     uint32_t primask;
@@ -180,6 +187,7 @@ static bool enqueue_uplink_frame(const uint8_t *data, uint16_t len)
     }
 
     frame = &g_data_router.uplink_tx_queue[g_data_router.uplink_tx_tail];
+    frame->type = (uint8_t)type;
     memcpy(frame->data, data, len);
     frame->len = len;
 
@@ -190,10 +198,56 @@ static bool enqueue_uplink_frame(const uint8_t *data, uint16_t len)
     return true;
 }
 
+#if DEBUG_LOG_ENABLED
+static void log_tx_start(UplinkTxFrameType type,
+                         const UART_HandleTypeDef *output_uart,
+                         const uint8_t *data,
+                         uint16_t len)
+{
+    if (type == UPLINK_TX_FRAME_TYPE_ROVER) {
+        char rover_line[ROVER_LINE_MAX_LEN];
+        uint16_t text_len = len;
+
+        if ((text_len >= 2U) && (data[text_len - 2U] == '\r') &&
+            (data[text_len - 1U] == '\n')) {
+            text_len -= 2U;
+        }
+
+        if (text_len >= sizeof(rover_line)) {
+            text_len = (uint16_t)(sizeof(rover_line) - 1U);
+        }
+
+        memcpy(rover_line, data, text_len);
+        rover_line[text_len] = '\0';
+
+        LOG("[uplink] tx rover -> %s: \"%s\"\r\n",
+            get_uart_name(output_uart),
+            rover_line);
+        return;
+    }
+
+    if ((type == UPLINK_TX_FRAME_TYPE_ARM) && (len == sizeof(PacketAC_v6))) {
+        LOG("[uplink] tx arm -> %s:", get_uart_name(output_uart));
+        for (uint16_t i = 0U; i < len; i++) {
+            LOG(" %02X", data[i]);
+        }
+        LOG("\r\n");
+        return;
+    }
+
+    LOG("[uplink] tx raw -> %s: len=%u\r\n",
+        get_uart_name(output_uart),
+        (unsigned int)len);
+}
+#endif
+
 static void pump_uplink_tx(void)
 {
     UART_HandleTypeDef *output_uart;
     uint16_t frame_len;
+#if DEBUG_LOG_ENABLED
+    UplinkTxFrameType frame_type;
+#endif
     uint32_t primask = enter_critical_section();
 
     if (g_data_router.uplink_tx_busy || (g_data_router.uplink_tx_count == 0U)) {
@@ -208,12 +262,20 @@ static void pump_uplink_tx(void)
     }
 
     frame_len = g_data_router.uplink_tx_queue[g_data_router.uplink_tx_head].len;
+#if DEBUG_LOG_ENABLED
+    frame_type =
+        (UplinkTxFrameType)g_data_router.uplink_tx_queue[g_data_router.uplink_tx_head].type;
+#endif
     memcpy(g_data_router.uplink_tx_dma_buffer,
            g_data_router.uplink_tx_queue[g_data_router.uplink_tx_head].data,
            frame_len);
     g_data_router.uplink_tx_busy = true;
     g_data_router.tx_uart = output_uart;
     exit_critical_section(primask);
+
+#if DEBUG_LOG_ENABLED
+    log_tx_start(frame_type, output_uart, g_data_router.uplink_tx_dma_buffer, frame_len);
+#endif
 
     if (HAL_UART_Transmit_DMA(output_uart, g_data_router.uplink_tx_dma_buffer,
                               frame_len) != HAL_OK) {
@@ -336,7 +398,7 @@ static void consume_rover_byte(uint8_t byte)
                    g_data_router.rover_line_index);
             tx_frame[g_data_router.rover_line_index] = '\r';
             tx_frame[g_data_router.rover_line_index + 1U] = '\n';
-            if (!enqueue_uplink_frame(tx_frame,
+            if (!enqueue_uplink_frame(UPLINK_TX_FRAME_TYPE_ROVER, tx_frame,
                                       (uint16_t)(g_data_router.rover_line_index + 2U))) {
                 LOG("[uplink] rover tx queue full\r\n");
             }
@@ -388,7 +450,8 @@ static void consume_arm_byte(uint8_t byte)
         g_data_router.arm_packet_buffer[g_data_router.arm_packet_index++] = byte;
         if (g_data_router.arm_packet_index >= sizeof(PacketAC_v6)) {
             if (validate_arm_packet(g_data_router.arm_packet_buffer)) {
-                if (!enqueue_uplink_frame(g_data_router.arm_packet_buffer,
+                if (!enqueue_uplink_frame(UPLINK_TX_FRAME_TYPE_ARM,
+                                          g_data_router.arm_packet_buffer,
                                           sizeof(PacketAC_v6))) {
                     LOG("[uplink] arm tx queue full\r\n");
                 }
