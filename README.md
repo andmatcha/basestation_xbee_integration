@@ -110,3 +110,68 @@ UART 受信処理と両立しやすい構成にしている。
 
 - `TIM3_UP` が `DMA1_Stream2` を使うため、未使用だった `UART4 RX DMA` は無効化している
 - `PB0/PB1` は LED 波形の立ち上がりを確保するため `GPIO_SPEED_FREQ_VERY_HIGH` にしている
+
+## uplink
+
+`uplink` は、`USART1 (Rover IN)` と `USART2 (Arm IN)` から受信したデータを
+選択中の出力 UART へまとめて送信する。
+
+出力先は次の 2 系統で、`PC13` のタクトスイッチを 2 秒長押しすると切り替わる。
+
+- `USART3`: USB OUT
+- `USART6`: XBee OUT
+
+入力元は次の 2 系統。
+
+- `USART1`: Rover IN
+- `USART2`: Arm IN
+
+### モジュール構成
+
+- `uplink/src/app.c`
+  - `main.c` から呼ばれる `init()` / `poll()` を提供するアプリ層
+- `uplink/src/modules/output_source_selector.c`
+  - `PC13` の長押しによる出力先切り替えを管理する
+- `uplink/src/modules/data_router.c`
+  - rover / arm の入力形式を解釈し、選択中の USB または XBee へ送る
+- `uplink/src/modules/status_leds.c`
+  - MODE LED / STATE LED の色と点滅状態を管理する
+- `uplink/src/modules/rgb_led_driver.c`
+  - `TIM3 CH3/CH4 (PB0/PB1)` を使って RGB LED 用の 1 線式波形を生成する
+
+### Rover データ形式
+
+- 形式: 改行終端のテキスト行
+- 受信元: `USART1`
+- 終端: `\n`
+- 無視する文字: `\r`
+- 最大長: 64 バイト
+- 出力時の整形: 選択中の `USART3` または `USART6` へ本文 + `\r\n` を送る
+
+補足:
+
+- 64 バイトを超えた行は改行まで破棄する
+- 送出先の downlink でも `JF` は arm パケット開始として解釈されるため、
+  rover 文字列中の `JF` はそのままでは安全ではない
+
+### Arm データ形式
+
+- 形式: `JF` で始まる固定長バイナリフレーム
+- 受信元: `USART2`
+- サイズ: 16 バイト固定
+- 先頭 2 バイト: ASCII の `J` `F` (`0x4A 0x46`)
+- 残り 14 バイト: 生バイト列
+- 出力時の整形: 選択中の `USART3` または `USART6` へ 16 バイトをそのまま送る
+
+補足:
+
+- `USART2` 側では `JF` を見つけて 16 バイト単位へ再同期する
+
+### LED 表示仕様
+
+LED の色、点滅周期、受信頻度グラデーション、`TIM3` + DMA による駆動方式は
+`downlink` と同一。
+
+補足:
+
+- `uplink` でも `TIM3_UP` が `DMA1_Stream2` を使うため、未使用の `UART4 RX DMA` は無効化している
