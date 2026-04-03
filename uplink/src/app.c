@@ -24,6 +24,11 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     data_router_on_uart_rx_complete(huart);
 }
 
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+    data_router_on_uart_tx_complete(huart);
+}
+
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
     data_router_on_uart_error(huart);

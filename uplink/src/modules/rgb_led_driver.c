@@ -9,8 +9,14 @@
 #define RGB_LED_MODE_CHANNEL                 TIM_CHANNEL_3
 #define RGB_LED_STATE_CHANNEL                TIM_CHANNEL_4
 #define RGB_LED_DMA_REQUEST                  TIM_DMA_UPDATE
-#define RGB_LED_DUTY_TICKS_0                 25U
-#define RGB_LED_DUTY_TICKS_1                 58U
+#define RGB_LED_SIGNAL_FREQ_HZ               800000U
+#define RGB_LED_DUTY_NUMERATOR_0             25U
+#define RGB_LED_DUTY_NUMERATOR_1             58U
+#define RGB_LED_DUTY_DENOMINATOR             105U
+#define RGB_LED_MIN_PERIOD_TICKS             2U
+#define RGB_LED_GPIO_PORT                    GPIOB
+#define RGB_LED_GPIO_PINS                    (GPIO_PIN_0 | GPIO_PIN_1)
+#define RGB_LED_GPIO_AF                      GPIO_AF2_TIM3
 #define RGB_LED_BITS_PER_FRAME               24U
 #define RGB_LED_RESET_SLOTS                  240U
 #define RGB_LED_FRAME_SLOTS                  (RGB_LED_BITS_PER_FRAME + RGB_LED_RESET_SLOTS)
@@ -27,13 +33,81 @@ typedef struct
     rgb_led_color_t desired_state_led;
     bool refresh_pending;
     bool frame_active;
+    uint16_t duty_ticks_0;
+    uint16_t duty_ticks_1;
     uint16_t dma_frame[RGB_LED_DMA_WORD_COUNT];
 } RgbLedDriverContext;
 
 static RgbLedDriverContext g_rgb_led_driver;
 
 extern TIM_HandleTypeDef htim3;
-DMA_HandleTypeDef hdma_tim3_up;
+extern DMA_HandleTypeDef hdma_tim3_ch4_up;
+
+static uint32_t get_timer_clock_hz(void)
+{
+    RCC_ClkInitTypeDef clock_config;
+    uint32_t flash_latency;
+    uint32_t apb1_timer_clock_hz = HAL_RCC_GetPCLK1Freq();
+
+    HAL_RCC_GetClockConfig(&clock_config, &flash_latency);
+
+    if (clock_config.APB1CLKDivider != RCC_HCLK_DIV1) {
+        apb1_timer_clock_hz *= 2U;
+    }
+
+    return apb1_timer_clock_hz / (RGB_LED_TIMER.Init.Prescaler + 1U);
+}
+
+static uint16_t scale_duty_ticks(uint32_t period_ticks, uint32_t numerator)
+{
+    uint32_t duty_ticks =
+        ((period_ticks * numerator) + (RGB_LED_DUTY_DENOMINATOR / 2U)) /
+        RGB_LED_DUTY_DENOMINATOR;
+
+    if (duty_ticks == 0U) {
+        duty_ticks = 1U;
+    }
+
+    if (duty_ticks >= period_ticks) {
+        duty_ticks = period_ticks - 1U;
+    }
+
+    return (uint16_t)duty_ticks;
+}
+
+static void configure_output_pins(void)
+{
+    GPIO_InitTypeDef gpio_init = {0};
+
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
+    gpio_init.Pin = RGB_LED_GPIO_PINS;
+    gpio_init.Mode = GPIO_MODE_AF_PP;
+    gpio_init.Pull = GPIO_NOPULL;
+    gpio_init.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    gpio_init.Alternate = RGB_LED_GPIO_AF;
+    HAL_GPIO_Init(RGB_LED_GPIO_PORT, &gpio_init);
+}
+
+static void configure_timer_waveform(void)
+{
+    const uint32_t timer_clock_hz = get_timer_clock_hz();
+    uint32_t period_ticks =
+        (timer_clock_hz + (RGB_LED_SIGNAL_FREQ_HZ / 2U)) / RGB_LED_SIGNAL_FREQ_HZ;
+
+    if (period_ticks < RGB_LED_MIN_PERIOD_TICKS) {
+        period_ticks = RGB_LED_MIN_PERIOD_TICKS;
+    }
+
+    g_rgb_led_driver.duty_ticks_0 =
+        scale_duty_ticks(period_ticks, RGB_LED_DUTY_NUMERATOR_0);
+    g_rgb_led_driver.duty_ticks_1 =
+        scale_duty_ticks(period_ticks, RGB_LED_DUTY_NUMERATOR_1);
+
+    __HAL_TIM_SET_COUNTER(&RGB_LED_TIMER, 0U);
+    __HAL_TIM_SET_AUTORELOAD(&RGB_LED_TIMER, period_ticks - 1U);
+    RGB_LED_TIMER.Init.Period = period_ticks - 1U;
+}
 
 static bool colors_equal(rgb_led_color_t left, rgb_led_color_t right)
 {
@@ -43,7 +117,7 @@ static bool colors_equal(rgb_led_color_t left, rgb_led_color_t right)
 
 static uint16_t get_duty_for_bit(bool is_set)
 {
-    return is_set ? RGB_LED_DUTY_TICKS_1 : RGB_LED_DUTY_TICKS_0;
+    return is_set ? g_rgb_led_driver.duty_ticks_1 : g_rgb_led_driver.duty_ticks_0;
 }
 
 static void encode_color_to_slot_range(rgb_led_color_t color, uint16_t slot_offset,
@@ -103,8 +177,6 @@ static void begin_dma_frame(void)
     g_rgb_led_driver.frame_active = true;
     g_rgb_led_driver.refresh_pending = false;
 
-    /* Prime slot 0 as the current PWM period and slot 1 as the first preload value.
-     * DMA then supplies slot 2 onward on each update event. */
     apply_slot(0U);
     __HAL_TIM_SET_COUNTER(&RGB_LED_TIMER, 0U);
     if (HAL_TIM_GenerateEvent(&RGB_LED_TIMER, TIM_EVENTSOURCE_UPDATE) != HAL_OK) {
@@ -127,9 +199,12 @@ void rgb_led_driver_init(void)
 {
     memset(&g_rgb_led_driver, 0, sizeof(g_rgb_led_driver));
 
-    if (RGB_LED_TIMER.hdma[TIM_DMA_ID_UPDATE] != &hdma_tim3_up) {
+    if (RGB_LED_TIMER.hdma[TIM_DMA_ID_UPDATE] != &hdma_tim3_ch4_up) {
         Error_Handler();
     }
+
+    configure_output_pins();
+    configure_timer_waveform();
 
     __HAL_TIM_SET_COMPARE(&RGB_LED_TIMER, RGB_LED_MODE_CHANNEL, 0U);
     __HAL_TIM_SET_COMPARE(&RGB_LED_TIMER, RGB_LED_STATE_CHANNEL, 0U);
