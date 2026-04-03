@@ -24,9 +24,8 @@
 
 /* USER CODE END Includes */
 extern DMA_HandleTypeDef hdma_tim3_ch3;
-extern DMA_HandleTypeDef hdma_tim3_up;
 
-extern DMA_HandleTypeDef hdma_uart4_rx;
+extern DMA_HandleTypeDef hdma_tim3_ch4_up;
 
 extern DMA_HandleTypeDef hdma_uart4_tx;
 
@@ -172,23 +171,26 @@ void HAL_TIM_PWM_MspInit(TIM_HandleTypeDef* htim_pwm)
 
     __HAL_LINKDMA(htim_pwm,hdma[TIM_DMA_ID_CC3],hdma_tim3_ch3);
 
-    /* TIM3_UP Init */
-    hdma_tim3_up.Instance = DMA1_Stream2;
-    hdma_tim3_up.Init.Channel = DMA_CHANNEL_5;
-    hdma_tim3_up.Init.Direction = DMA_MEMORY_TO_PERIPH;
-    hdma_tim3_up.Init.PeriphInc = DMA_PINC_DISABLE;
-    hdma_tim3_up.Init.MemInc = DMA_MINC_ENABLE;
-    hdma_tim3_up.Init.PeriphDataAlignment = DMA_PDATAALIGN_HALFWORD;
-    hdma_tim3_up.Init.MemDataAlignment = DMA_MDATAALIGN_HALFWORD;
-    hdma_tim3_up.Init.Mode = DMA_NORMAL;
-    hdma_tim3_up.Init.Priority = DMA_PRIORITY_HIGH;
-    hdma_tim3_up.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
-    if (HAL_DMA_Init(&hdma_tim3_up) != HAL_OK)
+    /* TIM3_CH4_UP Init */
+    hdma_tim3_ch4_up.Instance = DMA1_Stream2;
+    hdma_tim3_ch4_up.Init.Channel = DMA_CHANNEL_5;
+    hdma_tim3_ch4_up.Init.Direction = DMA_MEMORY_TO_PERIPH;
+    hdma_tim3_ch4_up.Init.PeriphInc = DMA_PINC_DISABLE;
+    hdma_tim3_ch4_up.Init.MemInc = DMA_MINC_ENABLE;
+    hdma_tim3_ch4_up.Init.PeriphDataAlignment = DMA_PDATAALIGN_HALFWORD;
+    hdma_tim3_ch4_up.Init.MemDataAlignment = DMA_MDATAALIGN_HALFWORD;
+    hdma_tim3_ch4_up.Init.Mode = DMA_NORMAL;
+    hdma_tim3_ch4_up.Init.Priority = DMA_PRIORITY_LOW;
+    hdma_tim3_ch4_up.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
+    if (HAL_DMA_Init(&hdma_tim3_ch4_up) != HAL_OK)
     {
       Error_Handler();
     }
 
-    __HAL_LINKDMA(htim_pwm,hdma[TIM_DMA_ID_UPDATE],hdma_tim3_up);
+    /* Several peripheral DMA handle pointers point to the same DMA handle.
+     Be aware that there is only one stream to perform all the requested DMAs. */
+    __HAL_LINKDMA(htim_pwm,hdma[TIM_DMA_ID_CC4],hdma_tim3_ch4_up);
+    __HAL_LINKDMA(htim_pwm,hdma[TIM_DMA_ID_UPDATE],hdma_tim3_ch4_up);
 
     /* USER CODE BEGIN TIM3_MspInit 1 */
 
@@ -237,7 +239,7 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef* htim)
     GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_InitStruct.Alternate = GPIO_AF2_TIM3;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
@@ -314,6 +316,8 @@ void HAL_TIM_PWM_MspDeInit(TIM_HandleTypeDef* htim_pwm)
 
     /* TIM3 DMA DeInit */
     HAL_DMA_DeInit(htim_pwm->hdma[TIM_DMA_ID_CC3]);
+    HAL_DMA_DeInit(htim_pwm->hdma[TIM_DMA_ID_CC4]);
+    HAL_DMA_DeInit(htim_pwm->hdma[TIM_DMA_ID_UPDATE]);
     /* USER CODE BEGIN TIM3_MspDeInit 1 */
 
     /* USER CODE END TIM3_MspDeInit 1 */
@@ -372,8 +376,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
     GPIO_InitStruct.Alternate = GPIO_AF8_UART4;
     HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-    /* UART4_RX DMA is intentionally unused so DMA1_Stream2 can be reserved for TIM3_UP. */
-
+    /* UART4 DMA Init */
     /* UART4_TX Init */
     hdma_uart4_tx.Instance = DMA1_Stream4;
     hdma_uart4_tx.Init.Channel = DMA_CHANNEL_4;
@@ -693,14 +696,7 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* huart)
     HAL_GPIO_DeInit(GPIOC, GPIO_PIN_10|GPIO_PIN_11);
 
     /* UART4 DMA DeInit */
-    if (huart->hdmarx != NULL)
-    {
-      HAL_DMA_DeInit(huart->hdmarx);
-    }
-    if (huart->hdmatx != NULL)
-    {
-      HAL_DMA_DeInit(huart->hdmatx);
-    }
+    HAL_DMA_DeInit(huart->hdmatx);
 
     /* UART4 interrupt DeInit */
     HAL_NVIC_DisableIRQ(UART4_IRQn);
