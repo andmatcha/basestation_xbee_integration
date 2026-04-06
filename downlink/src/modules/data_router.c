@@ -419,6 +419,80 @@ static uint16_t format_escaped_bytes(const uint8_t *bytes, uint16_t length,
     return output_idx;
 }
 
+static bool is_hex_digit(uint8_t byte)
+{
+    return ((byte >= '0') && (byte <= '9')) ||
+           ((byte >= 'A') && (byte <= 'F')) ||
+           ((byte >= 'a') && (byte <= 'f'));
+}
+
+static unsigned long hex_digit_to_value(uint8_t byte)
+{
+    if ((byte >= '0') && (byte <= '9')) {
+        return (unsigned long)(byte - '0');
+    }
+
+    if ((byte >= 'A') && (byte <= 'F')) {
+        return (unsigned long)(byte - 'A' + 10U);
+    }
+
+    return (unsigned long)(byte - 'a' + 10U);
+}
+
+static bool validate_rover_packet(const uint8_t *packet, uint16_t length)
+{
+    uint16_t idx = 2U;
+    unsigned long can_id = 0UL;
+
+    if (length < 5U) {
+        return false;
+    }
+
+    if ((packet[0] != '0') || ((packet[1] != 'x') && (packet[1] != 'X'))) {
+        return false;
+    }
+
+    if ((packet[idx] != '3') && (packet[idx] != '4')) {
+        return false;
+    }
+
+    while ((idx < length) && (packet[idx] != ',')) {
+        if (!is_hex_digit(packet[idx])) {
+            return false;
+        }
+
+        can_id = (can_id * 16UL) + hex_digit_to_value(packet[idx]);
+        if (can_id > 0x7FFUL) {
+            return false;
+        }
+
+        idx++;
+    }
+
+    if ((idx >= length) || (packet[idx] != ',')) {
+        return false;
+    }
+
+    idx++;
+    if ((idx < length) && ((packet[idx] == '-') || (packet[idx] == '+'))) {
+        idx++;
+    }
+
+    if (idx >= length) {
+        return false;
+    }
+
+    while (idx < length) {
+        if ((packet[idx] < '0') || (packet[idx] > '9')) {
+            return false;
+        }
+
+        idx++;
+    }
+
+    return true;
+}
+
 static void update_jf_pair_counter(uint8_t byte, bool *has_prev,
                                    uint8_t *previous_byte,
                                    uint16_t *jf_pair_count)
@@ -655,28 +729,19 @@ static void send_rover_packet(const uint8_t *packet, uint16_t length)
 {
     static const uint8_t line_ending[] = "\r\n";
     char escaped[ROVER_LOG_MAX_LEN];
-    bool is_valid_text = true;
 
     if (length == 0U) {
         return;
     }
 
-    for (uint16_t i = 0U; i < length; i++) {
-        const uint8_t byte = packet[i];
-
-        if (!(((byte >= 0x20U) && (byte <= 0x7EU)) || (byte == '\t'))) {
-            is_valid_text = false;
-        }
-    }
-
     format_escaped_bytes(packet, length, escaped, sizeof(escaped));
 
-    if (!is_valid_text) {
-        LOG("[downlink] rover invalid %u bytes:", length);
+    if (!validate_rover_packet(packet, length)) {
+        LOG("[downlink] rover rejected %u bytes:", length);
         for (uint16_t i = 0U; i < length; i++) {
             LOG(" %02X", packet[i]);
         }
-        LOG(" ascii=\"%s\"\r\n", escaped);
+        LOG(" ascii=\"%s\" (expected 0x3*/0x4* CAN text)\r\n", escaped);
         return;
     }
 
