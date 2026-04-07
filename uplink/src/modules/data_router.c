@@ -300,6 +300,10 @@ static bool validate_rover_line(const char *line)
         return false;
     }
 
+    if ((*cursor != '3') && (*cursor != '4')) {
+        return false;
+    }
+
     while ((*cursor != '\0') && (*cursor != ',')) {
         const char c = *cursor;
 
