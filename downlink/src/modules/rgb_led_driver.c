@@ -5,115 +5,40 @@
 #include <stdbool.h>
 #include <string.h>
 
-#define RGB_LED_TIMER                        htim3
-#define RGB_LED_MODE_CHANNEL                 TIM_CHANNEL_3
-#define RGB_LED_STATE_CHANNEL                TIM_CHANNEL_4
-#define RGB_LED_DMA_REQUEST                  TIM_DMA_UPDATE
-#define RGB_LED_SIGNAL_FREQ_HZ               800000U
-#define RGB_LED_DUTY_NUMERATOR_0             25U
-#define RGB_LED_DUTY_NUMERATOR_1             58U
-#define RGB_LED_DUTY_DENOMINATOR             105U
-#define RGB_LED_MAX_BRIGHTNESS_PERCENT       50U
-#define RGB_LED_MIN_PERIOD_TICKS             2U
-#define RGB_LED_GPIO_PORT                    GPIOB
-#define RGB_LED_GPIO_PINS                    (GPIO_PIN_0 | GPIO_PIN_1)
-#define RGB_LED_GPIO_AF                      GPIO_AF2_TIM3
-#define RGB_LED_BITS_PER_FRAME               24U
-#define RGB_LED_RESET_SLOTS                  240U
-#define RGB_LED_FRAME_SLOTS                  (RGB_LED_BITS_PER_FRAME + RGB_LED_RESET_SLOTS)
-#define RGB_LED_CHANNELS_PER_SLOT            2U
-#define RGB_LED_DMA_WORDS_PER_SLOT           RGB_LED_CHANNELS_PER_SLOT
-#define RGB_LED_DMA_WORD_COUNT               (RGB_LED_FRAME_SLOTS * RGB_LED_DMA_WORDS_PER_SLOT)
-#define RGB_LED_DMA_BURST_BASE               TIM_DMABASE_CCR3
-#define RGB_LED_DMA_BURST_LENGTH             TIM_DMABURSTLENGTH_2TRANSFERS
-#define RGB_LED_FIRST_DMA_SLOT_INDEX         2U
+#define RGB_LED_TIMER                    htim3
+#define RGB_LED_MODE_CHANNEL             TIM_CHANNEL_3
+#define RGB_LED_STATE_CHANNEL            TIM_CHANNEL_4
+#define RGB_LED_COUNT                    1U
+#define RGB_LED_BITS_PER_LED             24U
+#define RGB_LED_RESET_SLOTS              60U
+#define RGB_LED_BUFFER_SIZE              ((RGB_LED_COUNT * RGB_LED_BITS_PER_LED) + RGB_LED_RESET_SLOTS)
+#define RGB_LED_TIMER_CLOCK_HZ           16000000U
+#define RGB_LED_SIGNAL_FREQ_HZ           800000U
+#define RGB_LED_PERIOD_TICKS             (RGB_LED_TIMER_CLOCK_HZ / RGB_LED_SIGNAL_FREQ_HZ)
+#define RGB_LED_DUTY_0                   7U
+#define RGB_LED_DUTY_1                   13U
+#define RGB_LED_MAX_BRIGHTNESS_PERCENT   50U
 
 typedef struct
 {
-    rgb_led_color_t target_mode_led;
-    rgb_led_color_t target_state_led;
-    rgb_led_color_t active_mode_led;
-    rgb_led_color_t active_state_led;
-    rgb_led_color_t frame_mode_led;
-    rgb_led_color_t frame_state_led;
-    bool frame_updates_mode_led;
-    bool frame_updates_state_led;
-    bool frame_active;
-    uint16_t duty_ticks_0;
-    uint16_t duty_ticks_1;
-    uint16_t dma_frame[RGB_LED_DMA_WORD_COUNT];
+    uint32_t timer_channel;
+    rgb_led_color_t target_color;
+    rgb_led_color_t active_color;
+    rgb_led_color_t in_flight_color;
+    uint16_t pwm_data[RGB_LED_BUFFER_SIZE];
+} RgbLedOutputContext;
+
+typedef struct
+{
+    bool busy;
+    uint32_t active_channel;
+    RgbLedOutputContext mode_led;
+    RgbLedOutputContext state_led;
 } RgbLedDriverContext;
 
 static RgbLedDriverContext g_rgb_led_driver;
 
 extern TIM_HandleTypeDef htim3;
-extern DMA_HandleTypeDef hdma_tim3_ch4_up;
-
-static uint32_t get_timer_clock_hz(void)
-{
-    RCC_ClkInitTypeDef clock_config;
-    uint32_t flash_latency;
-    uint32_t apb1_timer_clock_hz = HAL_RCC_GetPCLK1Freq();
-
-    HAL_RCC_GetClockConfig(&clock_config, &flash_latency);
-
-    if (clock_config.APB1CLKDivider != RCC_HCLK_DIV1) {
-        apb1_timer_clock_hz *= 2U;
-    }
-
-    return apb1_timer_clock_hz / (RGB_LED_TIMER.Init.Prescaler + 1U);
-}
-
-static uint16_t scale_duty_ticks(uint32_t period_ticks, uint32_t numerator)
-{
-    uint32_t duty_ticks =
-        ((period_ticks * numerator) + (RGB_LED_DUTY_DENOMINATOR / 2U)) /
-        RGB_LED_DUTY_DENOMINATOR;
-
-    if (duty_ticks == 0U) {
-        duty_ticks = 1U;
-    }
-
-    if (duty_ticks >= period_ticks) {
-        duty_ticks = period_ticks - 1U;
-    }
-
-    return (uint16_t)duty_ticks;
-}
-
-static void configure_output_pins(void)
-{
-    GPIO_InitTypeDef gpio_init = {0};
-
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-
-    gpio_init.Pin = RGB_LED_GPIO_PINS;
-    gpio_init.Mode = GPIO_MODE_AF_PP;
-    gpio_init.Pull = GPIO_NOPULL;
-    gpio_init.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-    gpio_init.Alternate = RGB_LED_GPIO_AF;
-    HAL_GPIO_Init(RGB_LED_GPIO_PORT, &gpio_init);
-}
-
-static void configure_timer_waveform(void)
-{
-    const uint32_t timer_clock_hz = get_timer_clock_hz();
-    uint32_t period_ticks =
-        (timer_clock_hz + (RGB_LED_SIGNAL_FREQ_HZ / 2U)) / RGB_LED_SIGNAL_FREQ_HZ;
-
-    if (period_ticks < RGB_LED_MIN_PERIOD_TICKS) {
-        period_ticks = RGB_LED_MIN_PERIOD_TICKS;
-    }
-
-    g_rgb_led_driver.duty_ticks_0 =
-        scale_duty_ticks(period_ticks, RGB_LED_DUTY_NUMERATOR_0);
-    g_rgb_led_driver.duty_ticks_1 =
-        scale_duty_ticks(period_ticks, RGB_LED_DUTY_NUMERATOR_1);
-
-    __HAL_TIM_SET_COUNTER(&RGB_LED_TIMER, 0U);
-    __HAL_TIM_SET_AUTORELOAD(&RGB_LED_TIMER, period_ticks - 1U);
-    RGB_LED_TIMER.Init.Period = period_ticks - 1U;
-}
 
 static bool colors_equal(rgb_led_color_t left, rgb_led_color_t right)
 {
@@ -121,113 +46,93 @@ static bool colors_equal(rgb_led_color_t left, rgb_led_color_t right)
            (left.blue == right.blue);
 }
 
-static bool has_pending_refresh(void)
-{
-    return !colors_equal(g_rgb_led_driver.active_mode_led,
-                         g_rgb_led_driver.target_mode_led) ||
-           !colors_equal(g_rgb_led_driver.active_state_led,
-                         g_rgb_led_driver.target_state_led);
-}
-
-static uint16_t get_duty_for_bit(bool is_set)
-{
-    return is_set ? g_rgb_led_driver.duty_ticks_1 : g_rgb_led_driver.duty_ticks_0;
-}
-
 static uint8_t limit_brightness(uint8_t channel)
 {
     return (uint8_t)(((uint16_t)channel * RGB_LED_MAX_BRIGHTNESS_PERCENT) / 100U);
 }
 
-static void encode_color_to_slot_range(rgb_led_color_t color, uint16_t slot_offset,
-                                       bool is_mode_led)
+static void ws2812_clear(uint16_t *pwm_data)
 {
-    const uint8_t grb[3] = {limit_brightness(color.green),
-                            limit_brightness(color.red),
-                            limit_brightness(color.blue)};
-    uint16_t slot = slot_offset;
+    memset(pwm_data, 0, sizeof(uint16_t) * RGB_LED_BUFFER_SIZE);
+}
 
-    for (uint32_t byte_index = 0U; byte_index < 3U; byte_index++) {
-        for (uint32_t bit_index = 0U; bit_index < 8U; bit_index++) {
-            const bool is_set = (grb[byte_index] & (0x80U >> bit_index)) != 0U;
-            const uint16_t duty = get_duty_for_bit(is_set);
-            const uint16_t word_index = slot * RGB_LED_DMA_WORDS_PER_SLOT;
+static void ws2812_set_pixel(uint16_t *pwm_data, uint16_t index,
+                             rgb_led_color_t color)
+{
+    uint32_t color_data;
+    uint32_t base_index;
 
-            if (is_mode_led) {
-                g_rgb_led_driver.dma_frame[word_index] = duty;
-            } else {
-                g_rgb_led_driver.dma_frame[word_index + 1U] = duty;
-            }
+    if (index >= RGB_LED_COUNT) {
+        return;
+    }
 
-            slot++;
-        }
+    color_data = ((uint32_t)limit_brightness(color.green) << 16) |
+                 ((uint32_t)limit_brightness(color.red) << 8) |
+                 (uint32_t)limit_brightness(color.blue);
+    base_index = (uint32_t)index * RGB_LED_BITS_PER_LED;
+
+    for (uint32_t bit = 0U; bit < RGB_LED_BITS_PER_LED; bit++) {
+        pwm_data[base_index + bit] =
+            ((color_data & (1UL << (23U - bit))) != 0U) ? RGB_LED_DUTY_1
+                                                        : RGB_LED_DUTY_0;
     }
 }
 
-static void build_dma_frame(void)
+static void build_pwm_data(RgbLedOutputContext *output)
 {
-    memset(g_rgb_led_driver.dma_frame, 0, sizeof(g_rgb_led_driver.dma_frame));
-
-    if (g_rgb_led_driver.frame_updates_mode_led) {
-        encode_color_to_slot_range(g_rgb_led_driver.frame_mode_led, 0U, true);
-    }
-
-    if (g_rgb_led_driver.frame_updates_state_led) {
-        encode_color_to_slot_range(g_rgb_led_driver.frame_state_led, 0U, false);
-    }
+    ws2812_clear(output->pwm_data);
+    ws2812_set_pixel(output->pwm_data, 0U, output->in_flight_color);
 }
 
-static void apply_slot(uint16_t slot)
+static bool output_has_pending_refresh(const RgbLedOutputContext *output)
 {
-    const uint16_t word_index = slot * RGB_LED_DMA_WORDS_PER_SLOT;
-
-    __HAL_TIM_SET_COMPARE(&RGB_LED_TIMER, RGB_LED_MODE_CHANNEL,
-                          g_rgb_led_driver.dma_frame[word_index]);
-    __HAL_TIM_SET_COMPARE(&RGB_LED_TIMER, RGB_LED_STATE_CHANNEL,
-                          g_rgb_led_driver.dma_frame[word_index + 1U]);
+    return !colors_equal(output->active_color, output->target_color);
 }
 
-static void stop_dma_frame(void)
+static RgbLedOutputContext *get_output_by_channel(uint32_t timer_channel)
 {
-    if (HAL_TIM_DMABurst_WriteStop(&RGB_LED_TIMER, RGB_LED_DMA_REQUEST) != HAL_OK) {
-        Error_Handler();
+    if (timer_channel == g_rgb_led_driver.mode_led.timer_channel) {
+        return &g_rgb_led_driver.mode_led;
     }
+
+    if (timer_channel == g_rgb_led_driver.state_led.timer_channel) {
+        return &g_rgb_led_driver.state_led;
+    }
+
+    return NULL;
 }
 
-static void begin_dma_frame(void)
+static RgbLedOutputContext *get_next_output_to_refresh(void)
 {
-    HAL_StatusTypeDef status;
-    const uint32_t dma_word_count =
-        (RGB_LED_FRAME_SLOTS - RGB_LED_FIRST_DMA_SLOT_INDEX) * RGB_LED_DMA_WORDS_PER_SLOT;
+    if (output_has_pending_refresh(&g_rgb_led_driver.mode_led)) {
+        return &g_rgb_led_driver.mode_led;
+    }
 
-    g_rgb_led_driver.frame_updates_mode_led =
-        !colors_equal(g_rgb_led_driver.active_mode_led,
-                      g_rgb_led_driver.target_mode_led);
-    g_rgb_led_driver.frame_updates_state_led =
-        !colors_equal(g_rgb_led_driver.active_state_led,
-                      g_rgb_led_driver.target_state_led);
-    g_rgb_led_driver.frame_mode_led = g_rgb_led_driver.target_mode_led;
-    g_rgb_led_driver.frame_state_led = g_rgb_led_driver.target_state_led;
+    if (output_has_pending_refresh(&g_rgb_led_driver.state_led)) {
+        return &g_rgb_led_driver.state_led;
+    }
 
-    build_dma_frame();
-    g_rgb_led_driver.frame_active = true;
+    return NULL;
+}
 
-    /* Prime slot 0 as the current PWM period and slot 1 as the first preload value.
-     * DMA then supplies slot 2 onward on each update event. */
-    apply_slot(0U);
-    __HAL_TIM_SET_COUNTER(&RGB_LED_TIMER, 0U);
-    if (HAL_TIM_GenerateEvent(&RGB_LED_TIMER, TIM_EVENTSOURCE_UPDATE) != HAL_OK) {
+static void start_output_transfer(RgbLedOutputContext *output)
+{
+    if (RGB_LED_PERIOD_TICKS == 0U) {
         Error_Handler();
     }
 
-    apply_slot(1U);
+    output->in_flight_color = output->target_color;
+    build_pwm_data(output);
 
-    status = HAL_TIM_DMABurst_MultiWriteStart(
-        &RGB_LED_TIMER, RGB_LED_DMA_BURST_BASE, RGB_LED_DMA_REQUEST,
-        (const uint32_t *)&g_rgb_led_driver.dma_frame[RGB_LED_FIRST_DMA_SLOT_INDEX *
-                                                      RGB_LED_DMA_WORDS_PER_SLOT],
-        RGB_LED_DMA_BURST_LENGTH, dma_word_count);
-    if (status != HAL_OK) {
+    g_rgb_led_driver.busy = true;
+    g_rgb_led_driver.active_channel = output->timer_channel;
+
+    __HAL_TIM_SET_COMPARE(&RGB_LED_TIMER, output->timer_channel, 0U);
+    if (HAL_TIM_PWM_Start_DMA(&RGB_LED_TIMER, output->timer_channel,
+                              (uint32_t *)output->pwm_data,
+                              RGB_LED_BUFFER_SIZE) != HAL_OK) {
+        g_rgb_led_driver.busy = false;
+        g_rgb_led_driver.active_channel = 0U;
         Error_Handler();
     }
 }
@@ -236,66 +141,59 @@ void rgb_led_driver_init(void)
 {
     memset(&g_rgb_led_driver, 0, sizeof(g_rgb_led_driver));
 
-    if (RGB_LED_TIMER.hdma[TIM_DMA_ID_UPDATE] != &hdma_tim3_ch4_up) {
-        Error_Handler();
-    }
+    g_rgb_led_driver.mode_led.timer_channel = RGB_LED_MODE_CHANNEL;
+    g_rgb_led_driver.state_led.timer_channel = RGB_LED_STATE_CHANNEL;
 
-    configure_output_pins();
-    configure_timer_waveform();
+    ws2812_clear(g_rgb_led_driver.mode_led.pwm_data);
+    ws2812_clear(g_rgb_led_driver.state_led.pwm_data);
 
     __HAL_TIM_SET_COMPARE(&RGB_LED_TIMER, RGB_LED_MODE_CHANNEL, 0U);
     __HAL_TIM_SET_COMPARE(&RGB_LED_TIMER, RGB_LED_STATE_CHANNEL, 0U);
-
-    if (HAL_TIM_PWM_Start(&RGB_LED_TIMER, RGB_LED_MODE_CHANNEL) != HAL_OK) {
-        Error_Handler();
-    }
-
-    if (HAL_TIM_PWM_Start(&RGB_LED_TIMER, RGB_LED_STATE_CHANNEL) != HAL_OK) {
-        Error_Handler();
-    }
 }
 
 void rgb_led_driver_poll(void)
 {
-    if (g_rgb_led_driver.frame_active || !has_pending_refresh()) {
+    RgbLedOutputContext *next_output;
+
+    if (g_rgb_led_driver.busy) {
         return;
     }
 
-    begin_dma_frame();
+    next_output = get_next_output_to_refresh();
+    if (next_output == NULL) {
+        return;
+    }
+
+    start_output_transfer(next_output);
 }
 
 void rgb_led_driver_set_colors(rgb_led_color_t mode_led,
                                rgb_led_color_t state_led)
 {
-    if (colors_equal(g_rgb_led_driver.target_mode_led, mode_led) &&
-        colors_equal(g_rgb_led_driver.target_state_led, state_led)) {
-        return;
-    }
-
-    g_rgb_led_driver.target_mode_led = mode_led;
-    g_rgb_led_driver.target_state_led = state_led;
+    g_rgb_led_driver.mode_led.target_color = mode_led;
+    g_rgb_led_driver.state_led.target_color = state_led;
 }
 
-void rgb_led_driver_on_tim_period_elapsed(TIM_HandleTypeDef *htim)
+void rgb_led_driver_on_pwm_pulse_finished(TIM_HandleTypeDef *htim)
 {
-    if ((htim != &RGB_LED_TIMER) || !g_rgb_led_driver.frame_active) {
+    RgbLedOutputContext *output;
+
+    if ((htim != &RGB_LED_TIMER) || !g_rgb_led_driver.busy) {
         return;
     }
 
-    stop_dma_frame();
-
-    __HAL_TIM_SET_COMPARE(&RGB_LED_TIMER, RGB_LED_MODE_CHANNEL, 0U);
-    __HAL_TIM_SET_COMPARE(&RGB_LED_TIMER, RGB_LED_STATE_CHANNEL, 0U);
-
-    if (g_rgb_led_driver.frame_updates_mode_led) {
-        g_rgb_led_driver.active_mode_led = g_rgb_led_driver.frame_mode_led;
+    output = get_output_by_channel(g_rgb_led_driver.active_channel);
+    if (output == NULL) {
+        Error_Handler();
     }
 
-    if (g_rgb_led_driver.frame_updates_state_led) {
-        g_rgb_led_driver.active_state_led = g_rgb_led_driver.frame_state_led;
+    if (HAL_TIM_PWM_Stop_DMA(&RGB_LED_TIMER, g_rgb_led_driver.active_channel) != HAL_OK) {
+        Error_Handler();
     }
 
-    g_rgb_led_driver.frame_updates_mode_led = false;
-    g_rgb_led_driver.frame_updates_state_led = false;
-    g_rgb_led_driver.frame_active = false;
+    __HAL_TIM_SET_COMPARE(&RGB_LED_TIMER, g_rgb_led_driver.active_channel, 0U);
+
+    output->active_color = output->in_flight_color;
+    g_rgb_led_driver.active_channel = 0U;
+    g_rgb_led_driver.busy = false;
 }

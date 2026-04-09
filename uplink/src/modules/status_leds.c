@@ -202,7 +202,7 @@ void status_leds_on_rx_activity(void)
     g_status_leds.has_seen_rx = true;
 }
 
-void status_leds_on_tim_period_elapsed(TIM_HandleTypeDef *htim)
+void status_leds_on_tim_pwm_pulse_finished(TIM_HandleTypeDef *htim)
 {
-    rgb_led_driver_on_tim_period_elapsed(htim);
+    rgb_led_driver_on_pwm_pulse_finished(htim);
 }

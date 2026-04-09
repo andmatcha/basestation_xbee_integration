@@ -16,6 +16,6 @@ void rgb_led_driver_init(void);
 void rgb_led_driver_poll(void);
 void rgb_led_driver_set_colors(rgb_led_color_t mode_led,
                                rgb_led_color_t state_led);
-void rgb_led_driver_on_tim_period_elapsed(TIM_HandleTypeDef *htim);
+void rgb_led_driver_on_pwm_pulse_finished(TIM_HandleTypeDef *htim);
 
 #endif /* DOWNLINK_RGB_LED_DRIVER_H */

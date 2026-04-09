@@ -34,7 +34,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     data_router_on_uart_error(huart);
 }
 
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
 {
-    status_leds_on_tim_period_elapsed(htim);
+    status_leds_on_tim_pwm_pulse_finished(htim);
 }

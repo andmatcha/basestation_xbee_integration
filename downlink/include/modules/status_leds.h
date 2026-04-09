@@ -6,6 +6,6 @@
 void status_leds_init(void);
 void status_leds_poll(void);
 void status_leds_on_rx_activity(void);
-void status_leds_on_tim_period_elapsed(TIM_HandleTypeDef *htim);
+void status_leds_on_tim_pwm_pulse_finished(TIM_HandleTypeDef *htim);
 
 #endif /* DOWNLINK_STATUS_LEDS_H */
