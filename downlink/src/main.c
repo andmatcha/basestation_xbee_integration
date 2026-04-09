@@ -270,7 +270,7 @@ static void MX_TIM3_Init(void)
   htim3.Instance = TIM3;
   htim3.Init.Prescaler = 0;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 104;
+  htim3.Init.Period = 19;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
@@ -496,7 +496,7 @@ static void MX_USART6_UART_Init(void)
 
   /* USER CODE END USART6_Init 1 */
   huart6.Instance = USART6;
-  huart6.Init.BaudRate = 57600;
+  huart6.Init.BaudRate = 115200;
   huart6.Init.WordLength = UART_WORDLENGTH_8B;
   huart6.Init.StopBits = UART_STOPBITS_1;
   huart6.Init.Parity = UART_PARITY_NONE;
