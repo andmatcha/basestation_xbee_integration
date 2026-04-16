@@ -6,7 +6,7 @@
 #include <stdbool.h>
 
 #define UPLINK_OUTPUT_SWITCH_DEBOUNCE_MS 30U
-#define UPLINK_OUTPUT_SWITCH_HOLD_MS     2000U
+#define UPLINK_OUTPUT_SWITCH_HOLD_MS     1000U
 
 extern UART_HandleTypeDef huart3;
 extern UART_HandleTypeDef huart6;
