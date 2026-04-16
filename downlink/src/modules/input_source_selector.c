@@ -56,7 +56,7 @@ void input_source_selector_init(void)
     const uint32_t now_ms = HAL_GetTick();
     const GPIO_PinState switch_level = read_switch_level();
 
-    g_input_source_context.active_source = DOWNLINK_INPUT_SOURCE_USB;
+    g_input_source_context.active_source = DOWNLINK_INPUT_SOURCE_XBEE;
     g_input_source_context.last_sampled_level = switch_level;
     g_input_source_context.stable_level = switch_level;
     g_input_source_context.last_transition_tick_ms = now_ms;
