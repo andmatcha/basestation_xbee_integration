@@ -13,6 +13,7 @@
 #define RGB_LED_DUTY_NUMERATOR_0             25U
 #define RGB_LED_DUTY_NUMERATOR_1             58U
 #define RGB_LED_DUTY_DENOMINATOR             105U
+#define RGB_LED_MAX_BRIGHTNESS_PERCENT       50U
 #define RGB_LED_MIN_PERIOD_TICKS             2U
 #define RGB_LED_GPIO_PORT                    GPIOB
 #define RGB_LED_GPIO_PINS                    (GPIO_PIN_0 | GPIO_PIN_1)
@@ -29,9 +30,14 @@
 
 typedef struct
 {
-    rgb_led_color_t desired_mode_led;
-    rgb_led_color_t desired_state_led;
-    bool refresh_pending;
+    rgb_led_color_t target_mode_led;
+    rgb_led_color_t target_state_led;
+    rgb_led_color_t active_mode_led;
+    rgb_led_color_t active_state_led;
+    rgb_led_color_t frame_mode_led;
+    rgb_led_color_t frame_state_led;
+    bool frame_updates_mode_led;
+    bool frame_updates_state_led;
     bool frame_active;
     uint16_t duty_ticks_0;
     uint16_t duty_ticks_1;
@@ -115,15 +121,30 @@ static bool colors_equal(rgb_led_color_t left, rgb_led_color_t right)
            (left.blue == right.blue);
 }
 
+static bool has_pending_refresh(void)
+{
+    return !colors_equal(g_rgb_led_driver.active_mode_led,
+                         g_rgb_led_driver.target_mode_led) ||
+           !colors_equal(g_rgb_led_driver.active_state_led,
+                         g_rgb_led_driver.target_state_led);
+}
+
 static uint16_t get_duty_for_bit(bool is_set)
 {
     return is_set ? g_rgb_led_driver.duty_ticks_1 : g_rgb_led_driver.duty_ticks_0;
 }
 
+static uint8_t limit_brightness(uint8_t channel)
+{
+    return (uint8_t)(((uint16_t)channel * RGB_LED_MAX_BRIGHTNESS_PERCENT) / 100U);
+}
+
 static void encode_color_to_slot_range(rgb_led_color_t color, uint16_t slot_offset,
                                        bool is_mode_led)
 {
-    const uint8_t grb[3] = {color.green, color.red, color.blue};
+    const uint8_t grb[3] = {limit_brightness(color.green),
+                            limit_brightness(color.red),
+                            limit_brightness(color.blue)};
     uint16_t slot = slot_offset;
 
     for (uint32_t byte_index = 0U; byte_index < 3U; byte_index++) {
@@ -146,8 +167,14 @@ static void encode_color_to_slot_range(rgb_led_color_t color, uint16_t slot_offs
 static void build_dma_frame(void)
 {
     memset(g_rgb_led_driver.dma_frame, 0, sizeof(g_rgb_led_driver.dma_frame));
-    encode_color_to_slot_range(g_rgb_led_driver.desired_mode_led, 0U, true);
-    encode_color_to_slot_range(g_rgb_led_driver.desired_state_led, 0U, false);
+
+    if (g_rgb_led_driver.frame_updates_mode_led) {
+        encode_color_to_slot_range(g_rgb_led_driver.frame_mode_led, 0U, true);
+    }
+
+    if (g_rgb_led_driver.frame_updates_state_led) {
+        encode_color_to_slot_range(g_rgb_led_driver.frame_state_led, 0U, false);
+    }
 }
 
 static void apply_slot(uint16_t slot)
@@ -173,9 +200,17 @@ static void begin_dma_frame(void)
     const uint32_t dma_word_count =
         (RGB_LED_FRAME_SLOTS - RGB_LED_FIRST_DMA_SLOT_INDEX) * RGB_LED_DMA_WORDS_PER_SLOT;
 
+    g_rgb_led_driver.frame_updates_mode_led =
+        !colors_equal(g_rgb_led_driver.active_mode_led,
+                      g_rgb_led_driver.target_mode_led);
+    g_rgb_led_driver.frame_updates_state_led =
+        !colors_equal(g_rgb_led_driver.active_state_led,
+                      g_rgb_led_driver.target_state_led);
+    g_rgb_led_driver.frame_mode_led = g_rgb_led_driver.target_mode_led;
+    g_rgb_led_driver.frame_state_led = g_rgb_led_driver.target_state_led;
+
     build_dma_frame();
     g_rgb_led_driver.frame_active = true;
-    g_rgb_led_driver.refresh_pending = false;
 
     /* Prime slot 0 as the current PWM period and slot 1 as the first preload value.
      * DMA then supplies slot 2 onward on each update event. */
@@ -222,7 +257,7 @@ void rgb_led_driver_init(void)
 
 void rgb_led_driver_poll(void)
 {
-    if (!g_rgb_led_driver.refresh_pending || g_rgb_led_driver.frame_active) {
+    if (g_rgb_led_driver.frame_active || !has_pending_refresh()) {
         return;
     }
 
@@ -232,14 +267,13 @@ void rgb_led_driver_poll(void)
 void rgb_led_driver_set_colors(rgb_led_color_t mode_led,
                                rgb_led_color_t state_led)
 {
-    if (colors_equal(g_rgb_led_driver.desired_mode_led, mode_led) &&
-        colors_equal(g_rgb_led_driver.desired_state_led, state_led)) {
+    if (colors_equal(g_rgb_led_driver.target_mode_led, mode_led) &&
+        colors_equal(g_rgb_led_driver.target_state_led, state_led)) {
         return;
     }
 
-    g_rgb_led_driver.desired_mode_led = mode_led;
-    g_rgb_led_driver.desired_state_led = state_led;
-    g_rgb_led_driver.refresh_pending = true;
+    g_rgb_led_driver.target_mode_led = mode_led;
+    g_rgb_led_driver.target_state_led = state_led;
 }
 
 void rgb_led_driver_on_tim_period_elapsed(TIM_HandleTypeDef *htim)
@@ -253,5 +287,15 @@ void rgb_led_driver_on_tim_period_elapsed(TIM_HandleTypeDef *htim)
     __HAL_TIM_SET_COMPARE(&RGB_LED_TIMER, RGB_LED_MODE_CHANNEL, 0U);
     __HAL_TIM_SET_COMPARE(&RGB_LED_TIMER, RGB_LED_STATE_CHANNEL, 0U);
 
+    if (g_rgb_led_driver.frame_updates_mode_led) {
+        g_rgb_led_driver.active_mode_led = g_rgb_led_driver.frame_mode_led;
+    }
+
+    if (g_rgb_led_driver.frame_updates_state_led) {
+        g_rgb_led_driver.active_state_led = g_rgb_led_driver.frame_state_led;
+    }
+
+    g_rgb_led_driver.frame_updates_mode_led = false;
+    g_rgb_led_driver.frame_updates_state_led = false;
     g_rgb_led_driver.frame_active = false;
 }
