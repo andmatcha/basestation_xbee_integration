@@ -117,10 +117,7 @@ void buzzer_play_startup_melody(void)
                               BUZZER_STARTUP_GAP_MS),
         BUZZER_NOTE_WITH_REST(BUZZER_PITCH_G5,
                               BUZZER_EIGHTH_NOTE_MS(BUZZER_STARTUP_BPM),
-                              BUZZER_STARTUP_GAP_MS),
-        BUZZER_NOTE(BUZZER_PITCH_C6,
-                    BUZZER_DOTTED_NOTE_MS(
-                        BUZZER_EIGHTH_NOTE_MS(BUZZER_STARTUP_BPM))),
+                              BUZZER_STARTUP_GAP_MS)
     };
 
     buzzer_play_melody(startup_melody,
@@ -130,10 +127,10 @@ void buzzer_play_startup_melody(void)
 void buzzer_play_mode_switch_melody(void)
 {
     static const buzzer_note_t mode_switch_melody[] = {
-        BUZZER_NOTE_WITH_REST(BUZZER_PITCH_E5,
+        BUZZER_NOTE_WITH_REST(BUZZER_PITCH_C5,
                               BUZZER_SIXTEENTH_NOTE_MS(BUZZER_MODE_SWITCH_BPM),
                               BUZZER_MODE_SWITCH_GAP_MS),
-        BUZZER_NOTE(BUZZER_PITCH_G5,
+        BUZZER_NOTE(BUZZER_PITCH_E5,
                     BUZZER_EIGHTH_NOTE_MS(BUZZER_MODE_SWITCH_BPM)),
     };
 
