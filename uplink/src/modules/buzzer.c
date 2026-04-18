@@ -10,6 +10,8 @@
 #define BUZZER_MAX_PERIOD_TICKS         65536UL
 #define BUZZER_STARTUP_BPM              180U
 #define BUZZER_STARTUP_GAP_MS           20U
+#define BUZZER_MODE_SWITCH_BPM          220U
+#define BUZZER_MODE_SWITCH_GAP_MS       15U
 
 typedef struct
 {
@@ -120,4 +122,18 @@ void buzzer_play_startup_melody(void)
 
     buzzer_play_melody(startup_melody,
                        sizeof(startup_melody) / sizeof(startup_melody[0]));
+}
+
+void buzzer_play_mode_switch_melody(void)
+{
+    static const buzzer_note_t mode_switch_melody[] = {
+        BUZZER_NOTE_WITH_REST(BUZZER_PITCH_C5,
+                              BUZZER_SIXTEENTH_NOTE_MS(BUZZER_MODE_SWITCH_BPM),
+                              BUZZER_MODE_SWITCH_GAP_MS),
+        BUZZER_NOTE(BUZZER_PITCH_E5,
+                    BUZZER_EIGHTH_NOTE_MS(BUZZER_MODE_SWITCH_BPM)),
+    };
+
+    buzzer_play_melody(mode_switch_melody,
+                       sizeof(mode_switch_melody) / sizeof(mode_switch_melody[0]));
 }

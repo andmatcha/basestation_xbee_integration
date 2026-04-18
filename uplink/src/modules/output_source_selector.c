@@ -2,6 +2,7 @@
 
 #include "debug_log.h"
 #include "main.h"
+#include "modules/buzzer.h"
 
 #include <stdbool.h>
 
@@ -35,8 +36,13 @@ static bool has_elapsed(uint32_t start_tick_ms, uint32_t duration_ms)
 
 static void set_active_source(UplinkOutputSource source)
 {
+    if (g_output_source_context.active_source == source) {
+        return;
+    }
+
     g_output_source_context.active_source = source;
     LOG("[uplink] output source -> %s\r\n", uplink_output_source_get_current_name());
+    buzzer_play_mode_switch_melody();
 }
 
 static void handle_stable_switch_transition(GPIO_PinState stable_level, uint32_t now_ms)

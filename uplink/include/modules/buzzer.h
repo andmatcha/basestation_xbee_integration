@@ -97,5 +97,6 @@ void buzzer_init(void);
 void buzzer_play_tone(uint32_t frequency_hz, uint32_t duration_ms);
 void buzzer_play_melody(const buzzer_note_t *notes, uint32_t note_count);
 void buzzer_play_startup_melody(void);
+void buzzer_play_mode_switch_melody(void);
 
 #endif /* UPLINK_BUZZER_H */
