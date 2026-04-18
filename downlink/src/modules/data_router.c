@@ -725,6 +725,16 @@ static void sync_active_input_uart(bool log_change)
     }
 }
 
+static void transmit_to_all_outputs(const uint8_t *data, uint16_t length)
+{
+    if (length == 0U) {
+        return;
+    }
+
+    HAL_UART_Transmit(&ROVER_OUT_UART, (uint8_t *)data, length, HAL_MAX_DELAY);
+    HAL_UART_Transmit(&ARM_OUT_UART, (uint8_t *)data, length, HAL_MAX_DELAY);
+}
+
 static void send_rover_packet(const uint8_t *packet, uint16_t length)
 {
     static const uint8_t line_ending[] = "\r\n";
@@ -746,9 +756,8 @@ static void send_rover_packet(const uint8_t *packet, uint16_t length)
     }
 
     LOG("[downlink] rover rx %u bytes: \"%s\"\r\n", length, escaped);
-    HAL_UART_Transmit(&ROVER_OUT_UART, (uint8_t *)packet, length, HAL_MAX_DELAY);
-    HAL_UART_Transmit(&ROVER_OUT_UART, (uint8_t *)line_ending, sizeof(line_ending) - 1U,
-                      HAL_MAX_DELAY);
+    transmit_to_all_outputs(packet, length);
+    transmit_to_all_outputs(line_ending, sizeof(line_ending) - 1U);
 }
 
 static void send_arm_packet(const uint8_t *packet)
@@ -758,8 +767,7 @@ static void send_arm_packet(const uint8_t *packet)
         LOG(" %02X", packet[i]);
     }
     LOG("\r\n");
-    HAL_UART_Transmit(&ARM_OUT_UART, (uint8_t *)packet, ARM_PACKET_JF_SIZE,
-                      HAL_MAX_DELAY);
+    transmit_to_all_outputs(packet, ARM_PACKET_JF_SIZE);
 }
 
 static void queue_arm_packet_if_ready(void)
