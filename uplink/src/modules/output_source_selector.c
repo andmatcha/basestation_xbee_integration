@@ -6,7 +6,7 @@
 #include <stdbool.h>
 
 #define UPLINK_OUTPUT_SWITCH_DEBOUNCE_MS 30U
-#define UPLINK_OUTPUT_SWITCH_HOLD_MS     2000U
+#define UPLINK_OUTPUT_SWITCH_HOLD_MS     1000U
 
 extern UART_HandleTypeDef huart3;
 extern UART_HandleTypeDef huart6;
@@ -58,7 +58,7 @@ void output_source_selector_init(void)
     const uint32_t now_ms = HAL_GetTick();
     const GPIO_PinState switch_level = read_switch_level();
 
-    g_output_source_context.active_source = UPLINK_OUTPUT_SOURCE_USB;
+    g_output_source_context.active_source = UPLINK_OUTPUT_SOURCE_XBEE;
     g_output_source_context.last_sampled_level = switch_level;
     g_output_source_context.stable_level = switch_level;
     g_output_source_context.last_transition_tick_ms = now_ms;
