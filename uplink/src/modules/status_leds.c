@@ -12,6 +12,10 @@
 #define MODE_LED_XBEE_RED                 0U
 #define MODE_LED_XBEE_GREEN               160U
 #define MODE_LED_XBEE_BLUE                255U
+#define MODE_LED_SCIENCE_RED              160U
+#define MODE_LED_SCIENCE_GREEN            0U
+#define MODE_LED_SCIENCE_BLUE             255U
+#define MODE_LED_SCIENCE_ALT_PERIOD_MS    400U
 
 #define STATE_LED_IDLE_RED                0U
 #define STATE_LED_IDLE_GREEN              255U
@@ -75,13 +79,26 @@ static rgb_led_color_t lerp_color(rgb_led_color_t start, rgb_led_color_t end,
     return color;
 }
 
-static rgb_led_color_t get_mode_led_color(void)
+static rgb_led_color_t get_mode_led_color(uint32_t now_ms)
 {
+    rgb_led_color_t base_color;
+
     if (uplink_output_source_get_current() == UPLINK_OUTPUT_SOURCE_USB) {
-        return make_color(MODE_LED_USB_RED, MODE_LED_USB_GREEN, MODE_LED_USB_BLUE);
+        base_color = make_color(MODE_LED_USB_RED, MODE_LED_USB_GREEN, MODE_LED_USB_BLUE);
+    } else {
+        base_color = make_color(MODE_LED_XBEE_RED, MODE_LED_XBEE_GREEN, MODE_LED_XBEE_BLUE);
     }
 
-    return make_color(MODE_LED_XBEE_RED, MODE_LED_XBEE_GREEN, MODE_LED_XBEE_BLUE);
+    if (!uplink_output_source_is_science_mode_enabled()) {
+        return base_color;
+    }
+
+    if (((now_ms / MODE_LED_SCIENCE_ALT_PERIOD_MS) & 0x1U) == 0U) {
+        return base_color;
+    }
+
+    return make_color(MODE_LED_SCIENCE_RED, MODE_LED_SCIENCE_GREEN,
+                      MODE_LED_SCIENCE_BLUE);
 }
 
 static rgb_led_color_t get_idle_state_led_color(void)
@@ -179,7 +196,7 @@ void status_leds_poll(void)
     rgb_led_color_t state_led;
     uint32_t now_ms = HAL_GetTick();
 
-    mode_led = get_mode_led_color();
+    mode_led = get_mode_led_color(now_ms);
     state_led = get_state_led_color(now_ms);
 
     rgb_led_driver_set_colors(mode_led, state_led);
