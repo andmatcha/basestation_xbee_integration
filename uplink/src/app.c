@@ -1,5 +1,6 @@
 #include "app.h"
 
+#include "modules/buzzer.h"
 #include "modules/data_router.h"
 #include "modules/output_source_selector.h"
 #include "modules/status_leds.h"
@@ -10,6 +11,8 @@ void init(void)
     status_leds_init();
     data_router_init();
     status_leds_poll();
+    buzzer_init();
+    buzzer_play_startup_melody();
 }
 
 void poll(void)

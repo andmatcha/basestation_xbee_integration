@@ -2,6 +2,7 @@
 
 #include "debug_log.h"
 #include "main.h"
+#include "modules/buzzer.h"
 
 #include <stdbool.h>
 
@@ -40,14 +41,24 @@ static bool has_elapsed(uint32_t start_tick_ms, uint32_t duration_ms)
 
 static void set_active_source(UplinkOutputSource source)
 {
+    if (g_output_source_context.active_source == source) {
+        return;
+    }
+
     g_output_source_context.active_source = source;
     LOG("[uplink] output source -> %s\r\n", uplink_output_source_get_current_name());
+    buzzer_play_mode_switch_melody();
 }
 
 static void set_science_mode_enabled(bool enabled)
 {
+    if (g_output_source_context.science_mode_enabled == enabled) {
+        return;
+    }
+
     g_output_source_context.science_mode_enabled = enabled;
     LOG("[uplink] science mode -> %s\r\n", enabled ? "enabled" : "disabled");
+    buzzer_play_mode_switch_melody();
 }
 
 static void clear_short_press_sequence(void)

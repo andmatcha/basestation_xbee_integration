@@ -2,6 +2,7 @@
 
 #include "debug_log.h"
 #include "main.h"
+#include "modules/buzzer.h"
 
 #define DOWNLINK_INPUT_SWITCH_DEBOUNCE_MS 30U
 #define DOWNLINK_INPUT_SWITCH_HOLD_MS     1000U
@@ -38,14 +39,24 @@ static bool has_elapsed(uint32_t start_tick_ms, uint32_t duration_ms)
 
 static void set_active_source(DownlinkInputSource source)
 {
+    if (g_input_source_context.active_source == source) {
+        return;
+    }
+
     g_input_source_context.active_source = source;
     LOG("[downlink] input source -> %s\r\n", downlink_input_source_get_current_name());
+    buzzer_play_mode_switch_melody();
 }
 
 static void set_science_mode_enabled(bool enabled)
 {
+    if (g_input_source_context.science_mode_enabled == enabled) {
+        return;
+    }
+
     g_input_source_context.science_mode_enabled = enabled;
     LOG("[downlink] science mode -> %s\r\n", enabled ? "enabled" : "disabled");
+    buzzer_play_mode_switch_melody();
 }
 
 static void clear_short_press_sequence(void)
