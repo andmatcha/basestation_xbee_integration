@@ -1,0 +1,188 @@
+#include "modules/ac_packet_reducer.h"
+
+#include <stdbool.h>
+
+#define AC_PACKET_HEADER_LEN                 2U
+#define AC_PACKET_CONTROL_MODE_BYTE_INDEX    3U
+#define AC_PACKET_CONTROL_MODE_SHIFT         4U
+#define AC_PACKET_CONTROL_MODE_MASK          0x03U
+
+#define ARRAY_LEN(array) (sizeof(array) / sizeof((array)[0]))
+
+typedef enum
+{
+    AC_PACKET_CONTROL_MODE_IK = 0,
+    AC_PACKET_CONTROL_MODE_MANUAL = 1,
+    AC_PACKET_CONTROL_MODE_KEYBOARD_AUTO = 2,
+} AcPacketControlMode;
+
+typedef struct
+{
+    uint8_t first;
+    uint8_t last;
+} AcPacketByteRange;
+
+typedef struct
+{
+    AcPacketControlMode control_mode;
+    uint8_t reduced_header;
+    const AcPacketByteRange *delete_ranges;
+    size_t delete_range_count;
+} AcPacketReductionProfile;
+
+static const AcPacketByteRange m_packet_delete_ranges[] = {
+    {3U, 3U},
+    {18U, 29U},
+    {31U, 36U},
+};
+
+static const AcPacketByteRange i_packet_delete_ranges[] = {
+    {3U, 3U},
+    {8U, 13U},
+    {24U, 29U},
+    {31U, 36U},
+};
+
+static const AcPacketByteRange b_packet_delete_ranges[] = {
+    {3U, 17U},
+    {24U, 29U},
+    {35U, 36U},
+};
+
+static const AcPacketReductionProfile reduction_profiles[] = {
+    {
+        AC_PACKET_CONTROL_MODE_IK,
+        'I',
+        i_packet_delete_ranges,
+        ARRAY_LEN(i_packet_delete_ranges),
+    },
+    {
+        AC_PACKET_CONTROL_MODE_MANUAL,
+        'M',
+        m_packet_delete_ranges,
+        ARRAY_LEN(m_packet_delete_ranges),
+    },
+    {
+        AC_PACKET_CONTROL_MODE_KEYBOARD_AUTO,
+        'B',
+        b_packet_delete_ranges,
+        ARRAY_LEN(b_packet_delete_ranges),
+    },
+};
+
+static bool is_index_in_range(uint8_t index, const AcPacketByteRange *range)
+{
+    return (index >= range->first) && (index <= range->last);
+}
+
+static bool is_deleted_index(uint8_t index, const AcPacketReductionProfile *profile)
+{
+    for (size_t i = 0U; i < profile->delete_range_count; i++) {
+        if (is_index_in_range(index, &profile->delete_ranges[i])) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static const AcPacketReductionProfile *find_profile(uint8_t control_mode)
+{
+    for (size_t i = 0U; i < ARRAY_LEN(reduction_profiles); i++) {
+        if ((uint8_t)reduction_profiles[i].control_mode == control_mode) {
+            return &reduction_profiles[i];
+        }
+    }
+
+    return NULL;
+}
+
+static uint8_t extract_control_mode(const uint8_t *ac_packet)
+{
+    return (uint8_t)((ac_packet[AC_PACKET_CONTROL_MODE_BYTE_INDEX] >>
+                      AC_PACKET_CONTROL_MODE_SHIFT) &
+                     AC_PACKET_CONTROL_MODE_MASK);
+}
+
+static size_t calculate_reduced_len(const AcPacketReductionProfile *profile)
+{
+    size_t reduced_len = 1U;
+
+    for (uint8_t i = AC_PACKET_HEADER_LEN; i < AC_PACKET_REDUCER_AC_PACKET_LEN; i++) {
+        if (!is_deleted_index(i, profile)) {
+            reduced_len++;
+        }
+    }
+
+    return reduced_len;
+}
+
+AcPacketReducerResult ac_packet_reducer_reduce_for_xbee(const uint8_t *ac_packet,
+                                                        size_t ac_packet_len,
+                                                        uint8_t *output,
+                                                        size_t output_capacity,
+                                                        size_t *output_len)
+{
+    const AcPacketReductionProfile *profile;
+    size_t reduced_len;
+    size_t out_index = 0U;
+
+    if (output_len != NULL) {
+        *output_len = 0U;
+    }
+
+    if ((ac_packet == NULL) || (output == NULL)) {
+        return AC_PACKET_REDUCER_RESULT_INVALID_ARGUMENT;
+    }
+
+    if (ac_packet_len != AC_PACKET_REDUCER_AC_PACKET_LEN) {
+        return AC_PACKET_REDUCER_RESULT_INVALID_LENGTH;
+    }
+
+    if ((ac_packet[0] != 'A') || (ac_packet[1] != 'C')) {
+        return AC_PACKET_REDUCER_RESULT_INVALID_HEADER;
+    }
+
+    profile = find_profile(extract_control_mode(ac_packet));
+    if (profile == NULL) {
+        return AC_PACKET_REDUCER_RESULT_UNSUPPORTED_MODE;
+    }
+
+    reduced_len = calculate_reduced_len(profile);
+    if (output_capacity < reduced_len) {
+        return AC_PACKET_REDUCER_RESULT_OUTPUT_TOO_SMALL;
+    }
+
+    output[out_index++] = profile->reduced_header;
+    for (uint8_t i = AC_PACKET_HEADER_LEN; i < AC_PACKET_REDUCER_AC_PACKET_LEN; i++) {
+        if (!is_deleted_index(i, profile)) {
+            output[out_index++] = ac_packet[i];
+        }
+    }
+
+    if (output_len != NULL) {
+        *output_len = out_index;
+    }
+
+    return AC_PACKET_REDUCER_RESULT_OK;
+}
+
+const char *ac_packet_reducer_result_name(AcPacketReducerResult result)
+{
+    switch (result) {
+    case AC_PACKET_REDUCER_RESULT_OK:
+        return "ok";
+    case AC_PACKET_REDUCER_RESULT_INVALID_ARGUMENT:
+        return "invalid argument";
+    case AC_PACKET_REDUCER_RESULT_INVALID_LENGTH:
+        return "invalid length";
+    case AC_PACKET_REDUCER_RESULT_INVALID_HEADER:
+        return "invalid header";
+    case AC_PACKET_REDUCER_RESULT_UNSUPPORTED_MODE:
+        return "unsupported mode";
+    case AC_PACKET_REDUCER_RESULT_OUTPUT_TOO_SMALL:
+        return "output too small";
+    default:
+        return "unknown";
+    }
+}

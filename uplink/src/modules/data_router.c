@@ -2,6 +2,7 @@
 
 #include "debug_log.h"
 #include "main.h"
+#include "modules/ac_packet_reducer.h"
 #include "modules/output_source_selector.h"
 #include "modules/status_leds.h"
 
@@ -31,6 +32,9 @@ typedef struct __attribute__((packed))
     uint16_t fault_code;
     uint16_t crc16;
 } PacketAC_v6;
+
+typedef char PacketAC_v6_size_must_match_reducer[
+    (sizeof(PacketAC_v6) == AC_PACKET_REDUCER_AC_PACKET_LEN) ? 1 : -1];
 
 typedef struct
 {
@@ -237,6 +241,17 @@ static bool enqueue_uplink_frame(UplinkTxFrameType type, const uint8_t *data, ui
     return true;
 }
 
+static void advance_uplink_tx_head(void)
+{
+    if (g_data_router.uplink_tx_count == 0U) {
+        return;
+    }
+
+    g_data_router.uplink_tx_head =
+        (uint16_t)((g_data_router.uplink_tx_head + 1U) % UPLINK_TX_QUEUE_DEPTH);
+    g_data_router.uplink_tx_count--;
+}
+
 #if DEBUG_LOG_ENABLED
 static const char *get_text_frame_type_name(UplinkTxFrameType type)
 {
@@ -272,8 +287,10 @@ static void log_tx_start(UplinkTxFrameType type,
         return;
     }
 
-    if ((type == UPLINK_TX_FRAME_TYPE_ARM) && (len == sizeof(PacketAC_v6))) {
-        LOG("[uplink] tx arm -> %s:", get_uart_name(output_uart));
+    if (type == UPLINK_TX_FRAME_TYPE_ARM) {
+        LOG("[uplink] tx arm -> %s (%u bytes):",
+            get_uart_name(output_uart),
+            (unsigned int)len);
         for (uint16_t i = 0U; i < len; i++) {
             LOG(" %02X", data[i]);
         }
@@ -291,9 +308,9 @@ static void pump_uplink_tx(void)
 {
     UART_HandleTypeDef *output_uart;
     uint16_t frame_len;
-#if DEBUG_LOG_ENABLED
     UplinkTxFrameType frame_type;
-#endif
+    AcPacketReducerResult reduce_result = AC_PACKET_REDUCER_RESULT_OK;
+    bool dropped_frame = false;
     uint32_t primask = enter_critical_section();
 
     if (g_data_router.uplink_tx_busy || (g_data_router.uplink_tx_count == 0U)) {
@@ -307,14 +324,39 @@ static void pump_uplink_tx(void)
         return;
     }
 
-    frame_len = g_data_router.uplink_tx_queue[g_data_router.uplink_tx_head].len;
-#if DEBUG_LOG_ENABLED
     frame_type =
         (UplinkTxFrameType)g_data_router.uplink_tx_queue[g_data_router.uplink_tx_head].type;
-#endif
-    memcpy(g_data_router.uplink_tx_dma_buffer,
-           g_data_router.uplink_tx_queue[g_data_router.uplink_tx_head].data,
-           frame_len);
+    frame_len = g_data_router.uplink_tx_queue[g_data_router.uplink_tx_head].len;
+
+    if ((frame_type == UPLINK_TX_FRAME_TYPE_ARM) && (output_uart == &huart6)) {
+        size_t reduced_len = 0U;
+
+        reduce_result = ac_packet_reducer_reduce_for_xbee(
+            g_data_router.uplink_tx_queue[g_data_router.uplink_tx_head].data,
+            frame_len,
+            g_data_router.uplink_tx_dma_buffer,
+            sizeof(g_data_router.uplink_tx_dma_buffer),
+            &reduced_len);
+
+        if (reduce_result == AC_PACKET_REDUCER_RESULT_OK) {
+            frame_len = (uint16_t)reduced_len;
+        } else {
+            advance_uplink_tx_head();
+            dropped_frame = true;
+        }
+    } else {
+        memcpy(g_data_router.uplink_tx_dma_buffer,
+               g_data_router.uplink_tx_queue[g_data_router.uplink_tx_head].data,
+               frame_len);
+    }
+
+    if (dropped_frame) {
+        exit_critical_section(primask);
+        LOG("[uplink] dropped arm packet before XBee tx: %s\r\n",
+            ac_packet_reducer_result_name(reduce_result));
+        return;
+    }
+
     g_data_router.uplink_tx_busy = true;
     g_data_router.tx_uart = output_uart;
     exit_critical_section(primask);
@@ -701,11 +743,7 @@ void data_router_on_uart_tx_complete(UART_HandleTypeDef *huart)
     }
 
     primask = enter_critical_section();
-    if (g_data_router.uplink_tx_count > 0U) {
-        g_data_router.uplink_tx_head =
-            (uint16_t)((g_data_router.uplink_tx_head + 1U) % UPLINK_TX_QUEUE_DEPTH);
-        g_data_router.uplink_tx_count--;
-    }
+    advance_uplink_tx_head();
     g_data_router.uplink_tx_busy = false;
     g_data_router.tx_uart = NULL;
     exit_critical_section(primask);
