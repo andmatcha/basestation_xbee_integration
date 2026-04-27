@@ -489,20 +489,8 @@ static bool validate_rover_packet(const uint8_t *packet, uint16_t length)
     }
 
     idx++;
-    if ((idx < length) && ((packet[idx] == '-') || (packet[idx] == '+'))) {
-        idx++;
-    }
-
     if (idx >= length) {
         return false;
-    }
-
-    while (idx < length) {
-        if ((packet[idx] < '0') || (packet[idx] > '9')) {
-            return false;
-        }
-
-        idx++;
     }
 
     return true;
@@ -846,16 +834,6 @@ static void queue_rover_packet_if_ready(void)
     g_data_router.rover_rx_idx = 0U;
 }
 
-static bool is_decimal_digit(uint8_t byte)
-{
-    return (byte >= '0') && (byte <= '9');
-}
-
-static bool is_text_payload_byte(uint8_t byte)
-{
-    return (byte >= 0x20U) && (byte <= 0x7EU);
-}
-
 static TextPacketRoute classify_science_mode_text_packet(const uint8_t *packet,
                                                          uint16_t length)
 {
@@ -867,15 +845,9 @@ static TextPacketRoute classify_science_mode_text_packet(const uint8_t *packet,
         return TEXT_PACKET_ROUTE_NONE;
     }
 
-    if (!is_decimal_digit(packet[2]) || !is_decimal_digit(packet[3]) ||
-        !is_decimal_digit(packet[4]) || (packet[5] != ',')) {
+    if (!is_hex_digit(packet[2]) || !is_hex_digit(packet[3]) ||
+        !is_hex_digit(packet[4]) || (packet[5] != ',')) {
         return TEXT_PACKET_ROUTE_NONE;
-    }
-
-    for (uint16_t i = 6U; i < length; i++) {
-        if (!is_text_payload_byte(packet[i])) {
-            return TEXT_PACKET_ROUTE_NONE;
-        }
     }
 
     if (packet[2] == '5') {
@@ -944,7 +916,7 @@ static void filter_normal_mode_input_byte(uint8_t byte)
         }
     }
 
-    if (byte == 'J') {
+    if ((byte == 'J') && (g_data_router.rover_rx_idx == 0U)) {
         g_data_router.rover_pending_j = true;
         return;
     }
