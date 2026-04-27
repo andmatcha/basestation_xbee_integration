@@ -17,7 +17,6 @@
 #define SCIENCE_PACKET_MAX_LEN       TEXT_PACKET_MAX_LEN
 #define ARM_PACKET_JF_SIZE           16U
 #define TEXT_PACKET_LOG_MAX_LEN      (TEXT_PACKET_MAX_LEN * 4U + 1U)
-#define XBEE_API_FRAME_MAX_LEN       128U
 #define XBEE_DIAG_SAMPLE_MAX_LEN     48U
 #define XBEE_DIAG_REPORT_AFTER_BYTES 128U
 
@@ -26,20 +25,6 @@ typedef enum
     INPUT_MODE_ROVER = 0,
     INPUT_MODE_ARM,
 } InputMode;
-
-typedef enum
-{
-    XBEE_STREAM_MODE_UNKNOWN = 0,
-    XBEE_STREAM_MODE_TRANSPARENT,
-    XBEE_STREAM_MODE_API,
-} XBeeStreamMode;
-
-typedef enum
-{
-    XBEE_BYTE_DECODE_MODE_RAW = 0,
-    XBEE_BYTE_DECODE_MODE_MASK7,
-    XBEE_BYTE_DECODE_MODE_INVERTED,
-} XBeeByteDecodeMode;
 
 typedef enum
 {
@@ -67,14 +52,6 @@ typedef struct
     uint8_t science_packet_buf[SCIENCE_PACKET_MAX_LEN];
     volatile bool arm_packet_pending;
     uint8_t arm_packet_buf[ARM_PACKET_JF_SIZE];
-    XBeeStreamMode xbee_stream_mode;
-    XBeeByteDecodeMode xbee_byte_decode_mode;
-    bool xbee_api_in_frame;
-    bool xbee_api_escaped;
-    uint8_t xbee_api_length_bytes_received;
-    uint16_t xbee_api_expected_len;
-    uint16_t xbee_api_received_len;
-    uint8_t xbee_api_frame_buf[XBEE_API_FRAME_MAX_LEN];
     bool xbee_diag_reported;
     uint16_t xbee_diag_total_bytes;
     uint16_t xbee_diag_msb_set_bytes;
@@ -273,34 +250,6 @@ static void restart_receive_it(UART_HandleTypeDef *huart)
     }
 }
 
-#if DEBUG_LOG_ENABLED
-static const char *get_xbee_byte_decode_mode_name(XBeeByteDecodeMode mode)
-{
-    switch (mode) {
-    case XBEE_BYTE_DECODE_MODE_MASK7:
-        return "mask7";
-    case XBEE_BYTE_DECODE_MODE_INVERTED:
-        return "inverted";
-    case XBEE_BYTE_DECODE_MODE_RAW:
-    default:
-        return "raw";
-    }
-}
-#endif
-
-static uint8_t decode_xbee_stream_byte(uint8_t raw_byte)
-{
-    switch (g_data_router.xbee_byte_decode_mode) {
-    case XBEE_BYTE_DECODE_MODE_MASK7:
-        return raw_byte & 0x7FU;
-    case XBEE_BYTE_DECODE_MODE_INVERTED:
-        return (uint8_t)(~raw_byte);
-    case XBEE_BYTE_DECODE_MODE_RAW:
-    default:
-        return raw_byte;
-    }
-}
-
 static bool is_printable_stream_byte(uint8_t byte)
 {
     return (byte == '\t') || (byte == '\r') || (byte == '\n') ||
@@ -481,12 +430,6 @@ static void reset_xbee_filtered_stream_state(void)
     g_data_router.rover_rx_idx = 0U;
     g_data_router.text_line_overflow = false;
     g_data_router.arm_packet_rx_idx = 0U;
-    g_data_router.xbee_stream_mode = XBEE_STREAM_MODE_UNKNOWN;
-    g_data_router.xbee_api_in_frame = false;
-    g_data_router.xbee_api_escaped = false;
-    g_data_router.xbee_api_length_bytes_received = 0U;
-    g_data_router.xbee_api_expected_len = 0U;
-    g_data_router.xbee_api_received_len = 0U;
 }
 
 static void collect_xbee_diagnostics(uint8_t raw_byte)
@@ -578,7 +521,6 @@ static void maybe_log_xbee_diagnostics(void)
     const uint16_t raw_printable = g_data_router.xbee_diag_raw_printable_bytes;
     const uint16_t mask7_printable = g_data_router.xbee_diag_mask7_printable_bytes;
     const uint16_t inverted_printable = g_data_router.xbee_diag_inverted_printable_bytes;
-    XBeeByteDecodeMode suggested_mode = XBEE_BYTE_DECODE_MODE_RAW;
 #if DEBUG_LOG_ENABLED
     const uint32_t msb_percent =
         (100U * (uint32_t)g_data_router.xbee_diag_msb_set_bytes) / total_bytes;
@@ -601,15 +543,13 @@ static void maybe_log_xbee_diagnostics(void)
          (g_data_router.xbee_diag_raw_7e_bytes + 2U)) &&
         (inverted_printable >= raw_printable)) {
 #if DEBUG_LOG_ENABLED
-        hint = "inverted UART logic or inverting level shifter suspected";
+        hint = "inverted UART logic suspected; keeping raw bytes";
 #endif
-        suggested_mode = XBEE_BYTE_DECODE_MODE_INVERTED;
     } else if ((g_data_router.xbee_diag_msb_set_bytes * 4U >= total_bytes) &&
                (mask7_printable >= (uint16_t)(raw_printable + (total_bytes / 8U)))) {
 #if DEBUG_LOG_ENABLED
-        hint = "7-bit/parity mismatch suspected";
+        hint = "high-bit binary payload or 7-bit/parity mismatch; keeping raw bytes";
 #endif
-        suggested_mode = XBEE_BYTE_DECODE_MODE_MASK7;
     } else if ((g_data_router.xbee_diag_raw_7e_bytes == 0U) &&
                (g_data_router.xbee_diag_raw_jf_pairs == 0U) &&
                (mask7_printable > raw_printable) &&
@@ -640,21 +580,11 @@ static void maybe_log_xbee_diagnostics(void)
     log_xbee_sample_view("inv", inverted_transform);
 #endif
 
-    if (suggested_mode != XBEE_BYTE_DECODE_MODE_RAW) {
-        g_data_router.xbee_byte_decode_mode = suggested_mode;
-        reset_xbee_filtered_stream_state();
-#if DEBUG_LOG_ENABLED
-        LOG("[downlink] xbee decode mode -> %s (heuristic)\r\n",
-            get_xbee_byte_decode_mode_name(suggested_mode));
-#endif
-    }
-
     g_data_router.xbee_diag_reported = true;
 }
 
 static void reset_stream_parser(void)
 {
-    g_data_router.xbee_byte_decode_mode = XBEE_BYTE_DECODE_MODE_RAW;
     reset_xbee_filtered_stream_state();
     reset_xbee_diagnostics();
 }
@@ -900,133 +830,11 @@ static void filter_input_byte(uint8_t byte)
     filter_normal_mode_input_byte(byte);
 }
 
-static void reset_xbee_api_frame_state(void)
-{
-    g_data_router.xbee_api_in_frame = false;
-    g_data_router.xbee_api_escaped = false;
-    g_data_router.xbee_api_length_bytes_received = 0U;
-    g_data_router.xbee_api_expected_len = 0U;
-    g_data_router.xbee_api_received_len = 0U;
-}
-
-static void start_xbee_api_frame(void)
-{
-    reset_xbee_api_frame_state();
-    g_data_router.xbee_api_in_frame = true;
-}
-
-static void route_xbee_api_payload(const uint8_t *payload, uint16_t payload_len)
-{
-    for (uint16_t i = 0U; i < payload_len; i++) {
-        filter_input_byte(payload[i]);
-    }
-}
-
-static void handle_xbee_api_frame(void)
-{
-    const uint8_t *frame = g_data_router.xbee_api_frame_buf;
-    const uint16_t frame_len = g_data_router.xbee_api_expected_len;
-    const uint8_t frame_type = frame[0];
-    const uint8_t *payload = NULL;
-    uint16_t payload_len = 0U;
-
-    if (frame_len == 0U) {
-        return;
-    }
-
-    if (frame_type == 0x90U) {
-        if (frame_len < 12U) {
-            return;
-        }
-        payload = &frame[12];
-        payload_len = frame_len - 12U;
-    } else if (frame_type == 0x91U) {
-        if (frame_len < 18U) {
-            return;
-        }
-        payload = &frame[18];
-        payload_len = frame_len - 18U;
-    } else {
-        return;
-    }
-
-    if (g_data_router.xbee_stream_mode != XBEE_STREAM_MODE_API) {
-        g_data_router.xbee_stream_mode = XBEE_STREAM_MODE_API;
-        LOG("[downlink] xbee stream detected as API mode (frame 0x%02X)\r\n",
-            frame_type);
-    }
-
-    route_xbee_api_payload(payload, payload_len);
-}
-
 static void process_xbee_input_byte(uint8_t byte)
 {
-    uint32_t checksum_sum = 0U;
-
     collect_xbee_diagnostics(byte);
     maybe_log_xbee_diagnostics();
-    byte = decode_xbee_stream_byte(byte);
-
-    if (!g_data_router.xbee_api_in_frame) {
-        if (byte == 0x7EU) {
-            start_xbee_api_frame();
-            return;
-        }
-
-        if (g_data_router.xbee_stream_mode == XBEE_STREAM_MODE_API) {
-            return;
-        }
-
-        g_data_router.xbee_stream_mode = XBEE_STREAM_MODE_TRANSPARENT;
-        filter_input_byte(byte);
-        return;
-    }
-
-    if (g_data_router.xbee_api_escaped) {
-        byte ^= 0x20U;
-        g_data_router.xbee_api_escaped = false;
-    } else if (byte == 0x7DU) {
-        g_data_router.xbee_api_escaped = true;
-        return;
-    } else if (byte == 0x7EU) {
-        start_xbee_api_frame();
-        return;
-    }
-
-    if (g_data_router.xbee_api_length_bytes_received == 0U) {
-        g_data_router.xbee_api_expected_len = ((uint16_t)byte) << 8;
-        g_data_router.xbee_api_length_bytes_received = 1U;
-        return;
-    }
-
-    if (g_data_router.xbee_api_length_bytes_received == 1U) {
-        g_data_router.xbee_api_expected_len |= byte;
-        g_data_router.xbee_api_length_bytes_received = 2U;
-
-        if ((g_data_router.xbee_api_expected_len == 0U) ||
-            (g_data_router.xbee_api_expected_len > XBEE_API_FRAME_MAX_LEN)) {
-            reset_xbee_api_frame_state();
-        }
-        return;
-    }
-
-    if (g_data_router.xbee_api_received_len < g_data_router.xbee_api_expected_len) {
-        g_data_router.xbee_api_frame_buf[g_data_router.xbee_api_received_len++] = byte;
-        return;
-    }
-
-    for (uint16_t i = 0U; i < g_data_router.xbee_api_expected_len; i++) {
-        checksum_sum += g_data_router.xbee_api_frame_buf[i];
-    }
-    checksum_sum += byte;
-
-    if ((checksum_sum & 0xFFU) == 0xFFU) {
-        handle_xbee_api_frame();
-    } else if (g_data_router.xbee_stream_mode == XBEE_STREAM_MODE_UNKNOWN) {
-        g_data_router.xbee_stream_mode = XBEE_STREAM_MODE_TRANSPARENT;
-    }
-
-    reset_xbee_api_frame_state();
+    filter_input_byte(byte);
 }
 
 static void process_link_input_byte(uint8_t byte)

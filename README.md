@@ -169,6 +169,7 @@ downlink bridge 経路は次の構成。
 - 受信したバイトは解釈・整形せず UART4 TX キューに入れる
 - UART4 へ中継する RX は、旧 uplink 経路の出力先と同じ `USART3` または `USART6` のみを選択する
 - rover / arm / science の最終的な振り分けは downlink 側で行う
+- XBee は transparent mode 前提で扱い、API frame の `0x7E` delimiter 解析はしない
 
 ### LED 表示仕様
 
