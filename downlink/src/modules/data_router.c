@@ -8,15 +8,18 @@
 #include <stdbool.h>
 #include <string.h>
 
-#define ROVER_OUT_UART      huart1
-#define ARM_OUT_UART        huart2
-#define USB_IN_UART         huart3
-#define XBEE_IN_UART        huart6
-#define ROVER_PACKET_MAX_LEN 64U
-#define ARM_PACKET_JF_SIZE   16U
-#define ROVER_LOG_MAX_LEN    (ROVER_PACKET_MAX_LEN * 4U + 1U)
-#define XBEE_API_FRAME_MAX_LEN 128U
-#define XBEE_DIAG_SAMPLE_MAX_LEN 48U
+#define ROVER_OUT_UART               huart1
+#define ARM_OUT_UART                 huart2
+#define SCIENCE_OUT_UART             huart2
+#define USB_IN_UART                  huart3
+#define XBEE_IN_UART                 huart6
+#define TEXT_PACKET_MAX_LEN          128U
+#define ROVER_PACKET_MAX_LEN         TEXT_PACKET_MAX_LEN
+#define SCIENCE_PACKET_MAX_LEN       TEXT_PACKET_MAX_LEN
+#define ARM_PACKET_JF_SIZE           16U
+#define TEXT_PACKET_LOG_MAX_LEN      (TEXT_PACKET_MAX_LEN * 4U + 1U)
+#define XBEE_API_FRAME_MAX_LEN       128U
+#define XBEE_DIAG_SAMPLE_MAX_LEN     48U
 #define XBEE_DIAG_REPORT_AFTER_BYTES 128U
 
 typedef enum
@@ -46,6 +49,13 @@ typedef enum
     UART_TRACE_SOURCE_DMA2_STREAM1_IRQ,
 } UartTraceSource;
 
+typedef enum
+{
+    TEXT_PACKET_ROUTE_NONE = 0,
+    TEXT_PACKET_ROUTE_ROVER,
+    TEXT_PACKET_ROUTE_SCIENCE,
+} TextPacketRoute;
+
 typedef struct
 {
     bool valid;
@@ -59,17 +69,22 @@ typedef struct
 typedef struct
 {
     UART_HandleTypeDef *active_input_uart;
+    bool science_mode_enabled;
     InputMode input_mode;
     bool rover_pending_j;
     uint8_t usb_rx_char;
     uint8_t xbee_rx_char;
     uint8_t rover_rx_buf[ROVER_PACKET_MAX_LEN];
     uint16_t rover_rx_idx;
+    bool text_line_overflow;
     uint8_t arm_packet_rx_buf[ARM_PACKET_JF_SIZE];
     uint16_t arm_packet_rx_idx;
     volatile bool rover_packet_pending;
     volatile uint16_t rover_packet_len;
     uint8_t rover_packet_buf[ROVER_PACKET_MAX_LEN];
+    volatile bool science_packet_pending;
+    volatile uint16_t science_packet_len;
+    uint8_t science_packet_buf[SCIENCE_PACKET_MAX_LEN];
     volatile bool arm_packet_pending;
     uint8_t arm_packet_buf[ARM_PACKET_JF_SIZE];
     XBeeStreamMode xbee_stream_mode;
@@ -533,6 +548,7 @@ static void reset_xbee_filtered_stream_state(void)
     g_data_router.input_mode = INPUT_MODE_ROVER;
     g_data_router.rover_pending_j = false;
     g_data_router.rover_rx_idx = 0U;
+    g_data_router.text_line_overflow = false;
     g_data_router.arm_packet_rx_idx = 0U;
     g_data_router.xbee_stream_mode = XBEE_STREAM_MODE_UNKNOWN;
     g_data_router.xbee_api_in_frame = false;
@@ -659,7 +675,9 @@ static void maybe_log_xbee_diagnostics(void)
                (g_data_router.xbee_diag_raw_jf_pairs == 0U) &&
                (mask7_printable > raw_printable) &&
                (inverted_printable > raw_printable)) {
-        hint = "received bytes do not match expected rover/arm stream";
+        hint = g_data_router.science_mode_enabled
+                   ? "received bytes do not match expected rover/science stream"
+                   : "received bytes do not match expected rover/arm stream";
     }
 
     LOG("[downlink] xbee diag summary: bytes=%u msb=%lu%% printable(raw/mask7/inv)=%lu%%/%lu%%/%lu%% 0x7E(raw/mask7/inv)=%u/%u/%u JF(raw/mask7/inv)=%u/%u/%u\r\n",
@@ -696,6 +714,27 @@ static void reset_stream_parser(void)
     reset_xbee_diagnostics();
 }
 
+static void sync_science_mode(void)
+{
+    const bool science_mode_enabled =
+        downlink_input_source_is_science_mode_enabled();
+    uint32_t primask;
+
+    if (g_data_router.science_mode_enabled == science_mode_enabled) {
+        return;
+    }
+
+    primask = enter_critical_section();
+    g_data_router.science_mode_enabled = science_mode_enabled;
+    g_data_router.rover_packet_pending = false;
+    g_data_router.rover_packet_len = 0U;
+    g_data_router.arm_packet_pending = false;
+    g_data_router.science_packet_pending = false;
+    g_data_router.science_packet_len = 0U;
+    reset_stream_parser();
+    exit_critical_section(primask);
+}
+
 static void sync_active_input_uart(bool log_change)
 {
     UART_HandleTypeDef *active_uart = downlink_input_source_get_active_uart();
@@ -725,10 +764,28 @@ static void sync_active_input_uart(bool log_change)
     }
 }
 
-static void send_rover_packet(const uint8_t *packet, uint16_t length)
+static void send_text_packet(const char *label,
+                             UART_HandleTypeDef *huart,
+                             const uint8_t *packet,
+                             uint16_t length)
 {
     static const uint8_t line_ending[] = "\r\n";
-    char escaped[ROVER_LOG_MAX_LEN];
+    char escaped[TEXT_PACKET_LOG_MAX_LEN];
+
+    if (length == 0U) {
+        return;
+    }
+
+    format_escaped_bytes(packet, length, escaped, sizeof(escaped));
+    LOG("[downlink] %s rx %u bytes: \"%s\"\r\n", label, length, escaped);
+    HAL_UART_Transmit(huart, (uint8_t *)packet, length, HAL_MAX_DELAY);
+    HAL_UART_Transmit(huart, (uint8_t *)line_ending, sizeof(line_ending) - 1U,
+                      HAL_MAX_DELAY);
+}
+
+static void send_rover_packet(const uint8_t *packet, uint16_t length)
+{
+    char escaped[TEXT_PACKET_LOG_MAX_LEN];
 
     if (length == 0U) {
         return;
@@ -745,10 +802,7 @@ static void send_rover_packet(const uint8_t *packet, uint16_t length)
         return;
     }
 
-    LOG("[downlink] rover rx %u bytes: \"%s\"\r\n", length, escaped);
-    HAL_UART_Transmit(&ROVER_OUT_UART, (uint8_t *)packet, length, HAL_MAX_DELAY);
-    HAL_UART_Transmit(&ROVER_OUT_UART, (uint8_t *)line_ending, sizeof(line_ending) - 1U,
-                      HAL_MAX_DELAY);
+    send_text_packet("rover", &ROVER_OUT_UART, packet, length);
 }
 
 static void send_arm_packet(const uint8_t *packet)
@@ -792,7 +846,79 @@ static void queue_rover_packet_if_ready(void)
     g_data_router.rover_rx_idx = 0U;
 }
 
-static void filter_input_byte(uint8_t byte)
+static bool is_decimal_digit(uint8_t byte)
+{
+    return (byte >= '0') && (byte <= '9');
+}
+
+static bool is_text_payload_byte(uint8_t byte)
+{
+    return (byte >= 0x20U) && (byte <= 0x7EU);
+}
+
+static TextPacketRoute classify_science_mode_text_packet(const uint8_t *packet,
+                                                         uint16_t length)
+{
+    if (length < 7U) {
+        return TEXT_PACKET_ROUTE_NONE;
+    }
+
+    if ((packet[0] != '0') || ((packet[1] != 'x') && (packet[1] != 'X'))) {
+        return TEXT_PACKET_ROUTE_NONE;
+    }
+
+    if (!is_decimal_digit(packet[2]) || !is_decimal_digit(packet[3]) ||
+        !is_decimal_digit(packet[4]) || (packet[5] != ',')) {
+        return TEXT_PACKET_ROUTE_NONE;
+    }
+
+    for (uint16_t i = 6U; i < length; i++) {
+        if (!is_text_payload_byte(packet[i])) {
+            return TEXT_PACKET_ROUTE_NONE;
+        }
+    }
+
+    if (packet[2] == '5') {
+        return TEXT_PACKET_ROUTE_SCIENCE;
+    }
+
+    if ((packet[2] == '3') || (packet[2] == '4')) {
+        return TEXT_PACKET_ROUTE_ROVER;
+    }
+
+    return TEXT_PACKET_ROUTE_NONE;
+}
+
+static void queue_science_mode_text_packet_if_ready(void)
+{
+    const TextPacketRoute route =
+        classify_science_mode_text_packet(g_data_router.rover_rx_buf,
+                                          g_data_router.rover_rx_idx);
+
+    if ((g_data_router.rover_rx_idx == 0U) || g_data_router.text_line_overflow) {
+        g_data_router.rover_rx_idx = 0U;
+        g_data_router.text_line_overflow = false;
+        return;
+    }
+
+    if ((route == TEXT_PACKET_ROUTE_ROVER) && !g_data_router.rover_packet_pending) {
+        memcpy(g_data_router.rover_packet_buf, g_data_router.rover_rx_buf,
+               g_data_router.rover_rx_idx);
+        g_data_router.rover_packet_len = g_data_router.rover_rx_idx;
+        g_data_router.rover_packet_pending = true;
+    } else if ((route == TEXT_PACKET_ROUTE_SCIENCE) &&
+               !g_data_router.science_packet_pending) {
+        memcpy(g_data_router.science_packet_buf, g_data_router.rover_rx_buf,
+               g_data_router.rover_rx_idx);
+        g_data_router.science_packet_len = g_data_router.rover_rx_idx;
+        g_data_router.science_packet_pending = true;
+    }
+
+    g_data_router.rover_rx_idx = 0U;
+    g_data_router.text_line_overflow = false;
+}
+
+static void filter_normal_mode_input_byte(uint8_t byte)
 {
     if (g_data_router.input_mode == INPUT_MODE_ARM) {
         g_data_router.arm_packet_rx_buf[g_data_router.arm_packet_rx_idx++] = byte;
@@ -838,6 +964,40 @@ static void filter_input_byte(uint8_t byte)
     }
 
     g_data_router.rover_rx_idx = 0U;
+}
+
+static void filter_science_mode_input_byte(uint8_t byte)
+{
+    if (byte == '\r') {
+        return;
+    }
+
+    if (byte == '\n') {
+        queue_science_mode_text_packet_if_ready();
+        return;
+    }
+
+    if (g_data_router.text_line_overflow) {
+        return;
+    }
+
+    if (g_data_router.rover_rx_idx < TEXT_PACKET_MAX_LEN) {
+        g_data_router.rover_rx_buf[g_data_router.rover_rx_idx++] = byte;
+        return;
+    }
+
+    g_data_router.rover_rx_idx = 0U;
+    g_data_router.text_line_overflow = true;
+}
+
+static void filter_input_byte(uint8_t byte)
+{
+    if (g_data_router.science_mode_enabled) {
+        filter_science_mode_input_byte(byte);
+        return;
+    }
+
+    filter_normal_mode_input_byte(byte);
 }
 
 static void reset_xbee_api_frame_state(void)
@@ -982,6 +1142,8 @@ static void process_selected_input_byte(UART_HandleTypeDef *huart, uint8_t byte)
 void data_router_init(void)
 {
     memset(&g_data_router, 0, sizeof(g_data_router));
+    g_data_router.science_mode_enabled =
+        downlink_input_source_is_science_mode_enabled();
     g_uart_trace_source = UART_TRACE_SOURCE_NONE;
     memset((void *)&g_usart6_irq_snapshot, 0, sizeof(g_usart6_irq_snapshot));
     sync_active_input_uart(true);
@@ -991,11 +1153,15 @@ void data_router_poll(void)
 {
     uint8_t arm_packet[ARM_PACKET_JF_SIZE];
     uint8_t rover_packet[ROVER_PACKET_MAX_LEN];
+    uint8_t science_packet[SCIENCE_PACKET_MAX_LEN];
     uint16_t rover_packet_len = 0U;
+    uint16_t science_packet_len = 0U;
     bool has_arm_packet = false;
     bool has_rover_packet = false;
+    bool has_science_packet = false;
     uint32_t primask;
 
+    sync_science_mode();
     sync_active_input_uart(true);
 
     primask = enter_critical_section();
@@ -1014,14 +1180,35 @@ void data_router_poll(void)
         g_data_router.rover_packet_pending = false;
         has_rover_packet = true;
     }
+
+    if (g_data_router.science_packet_pending) {
+        science_packet_len = g_data_router.science_packet_len;
+        if (science_packet_len > SCIENCE_PACKET_MAX_LEN) {
+            science_packet_len = SCIENCE_PACKET_MAX_LEN;
+        }
+        memcpy(science_packet, g_data_router.science_packet_buf, science_packet_len);
+        g_data_router.science_packet_pending = false;
+        has_science_packet = true;
+    }
     exit_critical_section(primask);
 
-    if (has_arm_packet) {
-        send_arm_packet(arm_packet);
-    }
+    if (g_data_router.science_mode_enabled) {
+        if (has_rover_packet) {
+            send_text_packet("rover", &ROVER_OUT_UART, rover_packet, rover_packet_len);
+        }
 
-    if (has_rover_packet) {
-        send_rover_packet(rover_packet, rover_packet_len);
+        if (has_science_packet) {
+            send_text_packet("science", &SCIENCE_OUT_UART,
+                             science_packet, science_packet_len);
+        }
+    } else {
+        if (has_arm_packet) {
+            send_arm_packet(arm_packet);
+        }
+
+        if (has_rover_packet) {
+            send_rover_packet(rover_packet, rover_packet_len);
+        }
     }
 }
 
@@ -1035,6 +1222,7 @@ void data_router_on_uart_rx_complete(UART_HandleTypeDef *huart)
     }
 
     received_byte = *rx_char;
+    sync_science_mode();
     sync_active_input_uart(false);
 
     if (!downlink_input_source_is_selected_uart(huart)) {
@@ -1057,6 +1245,7 @@ void data_router_on_uart_error(UART_HandleTypeDef *huart)
         return;
     }
 
+    sync_science_mode();
     sync_active_input_uart(false);
 
     if (!downlink_input_source_is_selected_uart(huart)) {
