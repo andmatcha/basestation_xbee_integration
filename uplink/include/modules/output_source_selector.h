@@ -3,6 +3,8 @@
 
 #include "stm32f4xx_hal.h"
 
+#include <stdbool.h>
+
 typedef enum
 {
     UPLINK_OUTPUT_SOURCE_USB = 0,
@@ -15,5 +17,6 @@ void output_source_selector_poll(void);
 UplinkOutputSource uplink_output_source_get_current(void);
 const char *uplink_output_source_get_current_name(void);
 UART_HandleTypeDef *uplink_output_source_get_active_uart(void);
+bool uplink_output_source_is_science_mode_enabled(void);
 
 #endif /* UPLINK_OUTPUT_SOURCE_SELECTOR_H */

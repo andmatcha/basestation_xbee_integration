@@ -2,13 +2,12 @@
 
 ## downlink
 
-`downlink` は、選択中の入力 UART から受信したストリームを
+`downlink` は、`UART4` から受信したストリームを
 `USART1 (Rover OUT)` と `USART2 (Arm OUT)` に振り分ける。
 
-入力元は次の 2 系統で、`PC13` のタクトスイッチを 2 秒長押しすると切り替わる。
+入力元は uplink の `UART4 TX` と接続される次の 1 系統。
 
-- `USART3`: USB IN
-- `USART6`: XBee IN
+- `UART4`: uplink bridge IN
 
 出力先は次の 2 系統。
 
@@ -20,9 +19,9 @@
 - `downlink/src/app.c`
   - `main.c` から呼ばれる `init()` / `poll()` を提供するアプリ層
 - `downlink/src/modules/input_source_selector.c`
-  - `PC13` の長押しによる入力元切り替えを管理する
+  - `PC13` のダブルクリックによる通常/サイエンスモード切り替えを管理する
 - `downlink/src/modules/data_router.c`
-  - 選択中の入力ストリームを解釈し、rover 用と arm 用に振り分ける
+  - `UART4` の入力ストリームを解釈し、rover / arm / science 用に振り分ける
 - `downlink/src/modules/status_leds.c`
   - MODE LED / STATE LED の色と点滅状態を管理する
 - `downlink/src/modules/rgb_led_driver.c`
@@ -77,14 +76,13 @@
 
 ### MODE LED
 
-- 選択中の入力/出力ソースに応じて常時点灯し、点滅しない
-- USB 入力選択中: オレンジ `RGB(255, 96, 0)`
-- XBee 入力選択中: 水色 `RGB(0, 160, 255)`
+- UART4 入力待受中: 水色 `RGB(0, 160, 255)`
+- サイエンスモード中は紫との交互表示
 
 ### STATE LED
 
 - 初期化完了後の待機状態: 緑 `RGB(0, 255, 0)` で点灯
-- 選択中入力で受信が続いている間: 高速点滅
+- UART4 入力で受信が続いている間: 高速点滅
 - 点滅の半周期: `60ms`
 - 受信が止まったと判断する保持時間: `250ms`
 
@@ -116,65 +114,67 @@ UART 受信処理と両立しやすい構成にしている。
 
 ## uplink
 
-`uplink` は、`USART1 (Rover IN)` と `USART2 (Arm IN)` から受信したデータを
-選択中の出力 UART へまとめて送信する。
+`uplink` は、次の 2 系統を同時に扱う。
 
-出力先は次の 2 系統で、`PC13` のタクトスイッチを 2 秒長押しすると切り替わる。
+- `USART1 (Rover IN)` と `USART2 (Arm/Science IN)` から受信したデータを、
+  選択中の `USART3` または `USART6` へ送信する
+- `USART3 (USB IN)` と `USART6 (XBee IN)` から受信したデータを、
+  加工せず `UART4 TX` へ中継する
+
+旧来の出力先切り替えは維持しており、`PC13` のタクトスイッチを長押しすると
+`USART3` / `USART6` の出力先が切り替わる。ダブルクリックで通常/サイエンスモードを切り替える。
+
+旧 uplink 経路の入力元は次の 2 系統。
+
+- `USART1`: Rover IN
+- `USART2`: Arm/Science IN
+
+旧 uplink 経路の出力先は次の 2 系統。
 
 - `USART3`: USB OUT
 - `USART6`: XBee OUT
 
-入力元は次の 2 系統。
+downlink bridge 経路は次の構成。
 
-- `USART1`: Rover IN
-- `USART2`: Arm IN
+- `USART3`: USB IN
+- `USART6`: XBee IN
+
+- `UART4`: downlink bridge OUT
 
 ### モジュール構成
 
 - `uplink/src/app.c`
   - `main.c` から呼ばれる `init()` / `poll()` を提供するアプリ層
 - `uplink/src/modules/output_source_selector.c`
-  - `PC13` の長押しによる出力先切り替えを管理する
+  - `PC13` による出力先切り替えと通常/サイエンスモード切り替えを管理する
 - `uplink/src/modules/data_router.c`
-  - rover / arm の入力形式を解釈し、選択中の USB または XBee へ送る
+  - `USART1` / `USART2` の入力を解釈して選択中の `USART3` / `USART6` へ送る
+  - `USART3` / `USART6` の RX を circular DMA で読み、UART4 へ raw byte として送る
 - `uplink/src/modules/status_leds.c`
   - MODE LED / STATE LED の色と点滅状態を管理する
 - `uplink/src/modules/rgb_led_driver.c`
   - `TIM3 CH3/CH4 (PB0/PB1)` を使って RGB LED 用の 1 線式波形を生成する
 
-### Rover データ形式
+### 旧 uplink 経路
 
-- 形式: 改行終端のテキスト行
-- 受信元: `USART1`
-- 終端: `\n`
-- 無視する文字: `\r`
-- 最大長: 64 バイト
-- 受理条件: `0x3...` または `0x4...` で始まる `0xHEX,DECIMAL` 形式の行のみを送出する
-- 出力時の整形: 選択中の `USART3` または `USART6` へ本文 + `\r\n` を送る
+- `USART1` の rover テキストは `0x3...` または `0x4...` の CAN テキストとして検証して送出する
+- 通常モードでは `USART2` の arm バイナリを `AC` ヘッダと CRC で同期・検証して送出する
+- サイエンスモードでは `USART2` の `0x5..,...` テキストを science として送出する
+- `USART1` の `0x3..` / `0x4..` テキストはサイエンスモード中も rover として送出する
+- 送出先は `output_source_selector` が選ぶ `USART3` または `USART6`
 
-補足:
+### downlink bridge 経路
 
-- 64 バイトを超えた行は改行まで破棄する
-- 送出先の downlink でも `JF` は arm パケット開始として解釈されるため、
-  rover 文字列中の `JF` はそのままでは安全ではない
-
-### Arm データ形式
-
-- 形式: `JF` で始まる固定長バイナリフレーム
-- 受信元: `USART2`
-- サイズ: 16 バイト固定
-- 先頭 2 バイト: ASCII の `J` `F` (`0x4A 0x46`)
-- 残り 14 バイト: 生バイト列
-- 出力時の整形: 選択中の `USART3` または `USART6` へ 16 バイトをそのまま送る
-
-補足:
-
-- `USART2` 側では `JF` を見つけて 16 バイト単位へ再同期する
+- `USART3` / `USART6` の RX はどちらも circular DMA で受信する
+- 受信したバイトは解釈・整形せず UART4 TX キューに入れる
+- UART4 へ中継する RX は、旧 uplink 経路の出力先と同じ `USART3` または `USART6` のみを選択する
+- rover / arm / science の最終的な振り分けは downlink 側で行う
 
 ### LED 表示仕様
 
-LED の色、点滅周期、受信頻度グラデーション、`TIM3` + DMA による駆動方式は
-`downlink` と同一で、表示色の最大光量も `rgb_led_driver.c` 側で 50% に制限している。
+LED の点滅周期、受信頻度グラデーション、`TIM3` + DMA による駆動方式は
+`downlink` と同一で、MODE LED は選択中の旧 uplink 出力先とサイエンスモードを示す。
+表示色の最大光量も `rgb_led_driver.c` 側で 50% に制限している。
 
 補足:
 
