@@ -9,7 +9,7 @@
 
 typedef struct
 {
-    payload_mode_t payload_mode;
+    module_mode_t module_mode;
     xbee_mode_t xbee_mode;
     GPIO_PinState last_sampled_level;
     GPIO_PinState stable_level;
@@ -35,13 +35,13 @@ static bool has_elapsed(uint32_t start_ms, uint32_t duration_ms)
     return (HAL_GetTick() - start_ms) >= duration_ms;
 }
 
-static void toggle_payload_mode(void)
+static void toggle_module_mode(void)
 {
-    g_mode.payload_mode =
-        (g_mode.payload_mode == PAYLOAD_MODE_ARM) ? PAYLOAD_MODE_SCIENCE
-                                                  : PAYLOAD_MODE_ARM;
+    g_mode.module_mode =
+        (g_mode.module_mode == MODULE_MODE_ARM) ? MODULE_MODE_SCIENCE
+                                                  : MODULE_MODE_ARM;
     g_mode.generation++;
-    LOG("[integrated] payload mode -> %s\r\n", mode_control_get_payload_name());
+    LOG("[integrated] module mode -> %s\r\n", mode_control_get_module_name());
     buzzer_play_short_beep();
 }
 
@@ -87,7 +87,7 @@ void mode_control_init(void)
     const uint32_t now_ms = HAL_GetTick();
     const GPIO_PinState level = read_mode_switch();
 
-    g_mode.payload_mode = PAYLOAD_MODE_ARM;
+    g_mode.module_mode = MODULE_MODE_ARM;
     g_mode.xbee_mode = XBEE_MODE_ONBOARD;
     g_mode.last_sampled_level = level;
     g_mode.stable_level = level;
@@ -98,7 +98,7 @@ void mode_control_init(void)
     g_mode.single_click_pending = false;
 
     LOG("[integrated] default mode -> %s / %s\r\n",
-        mode_control_get_payload_name(), mode_control_get_xbee_name());
+        mode_control_get_module_name(), mode_control_get_xbee_name());
 }
 
 void mode_control_poll(void)
@@ -119,13 +119,13 @@ void mode_control_poll(void)
     if (g_mode.single_click_pending &&
         has_elapsed(g_mode.first_release_ms, MODE_SWITCH_DOUBLE_CLICK_MS)) {
         g_mode.single_click_pending = false;
-        toggle_payload_mode();
+        toggle_module_mode();
     }
 }
 
-payload_mode_t mode_control_get_payload_mode(void)
+module_mode_t mode_control_get_module_mode(void)
 {
-    return g_mode.payload_mode;
+    return g_mode.module_mode;
 }
 
 xbee_mode_t mode_control_get_xbee_mode(void)
@@ -138,9 +138,9 @@ uint32_t mode_control_get_generation(void)
     return g_mode.generation;
 }
 
-const char *mode_control_get_payload_name(void)
+const char *mode_control_get_module_name(void)
 {
-    return (g_mode.payload_mode == PAYLOAD_MODE_ARM) ? "Arm" : "Science";
+    return (g_mode.module_mode == MODULE_MODE_ARM) ? "Arm" : "Science";
 }
 
 const char *mode_control_get_xbee_name(void)

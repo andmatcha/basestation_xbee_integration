@@ -106,7 +106,7 @@ static void build_status_lines(char *line0, char *line1)
     const link_stat_snapshot_t downlink = link_stats_get_snapshot(LINK_STAT_DOWNLINK);
 
     (void)snprintf(line0, DISPLAY_LINE_LEN + 1U, "%s %s",
-                   mode_control_get_payload_name(),
+                   mode_control_get_module_name(),
                    mode_control_get_xbee_name());
     pad_line(line0);
 
