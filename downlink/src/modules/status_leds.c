@@ -6,12 +6,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define MODE_LED_USB_RED                  255U
-#define MODE_LED_USB_GREEN                96U
-#define MODE_LED_USB_BLUE                 0U
-#define MODE_LED_XBEE_RED                 0U
-#define MODE_LED_XBEE_GREEN               160U
-#define MODE_LED_XBEE_BLUE                255U
+#define MODE_LED_LINK_RED                 0U
+#define MODE_LED_LINK_GREEN               160U
+#define MODE_LED_LINK_BLUE                255U
 #define MODE_LED_SCIENCE_RED              160U
 #define MODE_LED_SCIENCE_GREEN            0U
 #define MODE_LED_SCIENCE_BLUE             255U
@@ -81,13 +78,8 @@ static rgb_led_color_t lerp_color(rgb_led_color_t start, rgb_led_color_t end,
 
 static rgb_led_color_t get_mode_led_color(uint32_t now_ms)
 {
-    rgb_led_color_t base_color;
-
-    if (downlink_input_source_get_current() == DOWNLINK_INPUT_SOURCE_USB) {
-        base_color = make_color(MODE_LED_USB_RED, MODE_LED_USB_GREEN, MODE_LED_USB_BLUE);
-    } else {
-        base_color = make_color(MODE_LED_XBEE_RED, MODE_LED_XBEE_GREEN, MODE_LED_XBEE_BLUE);
-    }
+    rgb_led_color_t base_color =
+        make_color(MODE_LED_LINK_RED, MODE_LED_LINK_GREEN, MODE_LED_LINK_BLUE);
 
     if (!downlink_input_source_is_science_mode_enabled()) {
         return base_color;

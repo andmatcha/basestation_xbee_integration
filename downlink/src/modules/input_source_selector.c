@@ -4,17 +4,15 @@
 #include "main.h"
 #include "modules/buzzer.h"
 
-#define DOWNLINK_INPUT_SWITCH_DEBOUNCE_MS 30U
-#define DOWNLINK_INPUT_SWITCH_HOLD_MS     1000U
-#define DOWNLINK_INPUT_SHORT_PRESS_MAX_MS 350U
-#define DOWNLINK_INPUT_DOUBLE_PUSH_GAP_MS 400U
+#define DOWNLINK_MODE_SWITCH_DEBOUNCE_MS     30U
+#define DOWNLINK_MODE_SWITCH_HOLD_MS         1000U
+#define DOWNLINK_MODE_SHORT_PRESS_MAX_MS     350U
+#define DOWNLINK_MODE_DOUBLE_PUSH_GAP_MS     400U
 
-extern UART_HandleTypeDef huart3;
-extern UART_HandleTypeDef huart6;
+extern UART_HandleTypeDef huart4;
 
 typedef struct
 {
-    DownlinkInputSource active_source;
     GPIO_PinState last_sampled_level;
     GPIO_PinState stable_level;
     uint32_t last_transition_tick_ms;
@@ -35,17 +33,6 @@ static GPIO_PinState read_switch_level(void)
 static bool has_elapsed(uint32_t start_tick_ms, uint32_t duration_ms)
 {
     return (HAL_GetTick() - start_tick_ms) >= duration_ms;
-}
-
-static void set_active_source(DownlinkInputSource source)
-{
-    if (g_input_source_context.active_source == source) {
-        return;
-    }
-
-    g_input_source_context.active_source = source;
-    LOG("[downlink] input source -> %s\r\n", downlink_input_source_get_current_name());
-    buzzer_play_mode_switch_melody();
 }
 
 static void set_science_mode_enabled(bool enabled)
@@ -69,7 +56,7 @@ static void register_short_press(uint32_t now_ms)
 {
     if ((g_input_source_context.short_press_count == 0U) ||
         has_elapsed(g_input_source_context.last_short_release_tick_ms,
-                    DOWNLINK_INPUT_DOUBLE_PUSH_GAP_MS)) {
+                    DOWNLINK_MODE_DOUBLE_PUSH_GAP_MS)) {
         g_input_source_context.short_press_count = 1U;
         g_input_source_context.last_short_release_tick_ms = now_ms;
         return;
@@ -102,7 +89,7 @@ static void handle_stable_switch_transition(GPIO_PinState stable_level, uint32_t
 
     if (!g_input_source_context.long_press_handled &&
         (press_duration_ms > 0U) &&
-        (press_duration_ms <= DOWNLINK_INPUT_SHORT_PRESS_MAX_MS)) {
+        (press_duration_ms <= DOWNLINK_MODE_SHORT_PRESS_MAX_MS)) {
         register_short_press(now_ms);
     } else if (!g_input_source_context.long_press_handled) {
         clear_short_press_sequence();
@@ -117,7 +104,6 @@ void input_source_selector_init(void)
     const uint32_t now_ms = HAL_GetTick();
     const GPIO_PinState switch_level = read_switch_level();
 
-    g_input_source_context.active_source = DOWNLINK_INPUT_SOURCE_XBEE;
     g_input_source_context.last_sampled_level = switch_level;
     g_input_source_context.stable_level = switch_level;
     g_input_source_context.last_transition_tick_ms = now_ms;
@@ -128,7 +114,7 @@ void input_source_selector_init(void)
     g_input_source_context.science_mode_enabled = false;
     g_input_source_context.short_press_count = 0U;
 
-    LOG("[downlink] input source default -> %s\r\n",
+    LOG("[downlink] input source -> %s\r\n",
         downlink_input_source_get_current_name());
 }
 
@@ -144,51 +130,38 @@ void input_source_selector_poll(void)
 
     if ((g_input_source_context.stable_level != g_input_source_context.last_sampled_level) &&
         has_elapsed(g_input_source_context.last_transition_tick_ms,
-                    DOWNLINK_INPUT_SWITCH_DEBOUNCE_MS)) {
+                    DOWNLINK_MODE_SWITCH_DEBOUNCE_MS)) {
         handle_stable_switch_transition(g_input_source_context.last_sampled_level, now_ms);
     }
 
     if ((g_input_source_context.short_press_count > 0U) &&
         has_elapsed(g_input_source_context.last_short_release_tick_ms,
-                    DOWNLINK_INPUT_DOUBLE_PUSH_GAP_MS)) {
+                    DOWNLINK_MODE_DOUBLE_PUSH_GAP_MS)) {
         clear_short_press_sequence();
     }
 
     if ((g_input_source_context.stable_level == GPIO_PIN_RESET) &&
         !g_input_source_context.long_press_handled &&
         has_elapsed(g_input_source_context.pressed_tick_ms,
-                    DOWNLINK_INPUT_SWITCH_HOLD_MS)) {
-        set_active_source(
-            (g_input_source_context.active_source == DOWNLINK_INPUT_SOURCE_USB)
-                ? DOWNLINK_INPUT_SOURCE_XBEE
-                : DOWNLINK_INPUT_SOURCE_USB);
+                    DOWNLINK_MODE_SWITCH_HOLD_MS)) {
         g_input_source_context.long_press_handled = true;
         clear_short_press_sequence();
     }
 }
 
-DownlinkInputSource downlink_input_source_get_current(void)
-{
-    return g_input_source_context.active_source;
-}
-
 const char *downlink_input_source_get_current_name(void)
 {
-    return (g_input_source_context.active_source == DOWNLINK_INPUT_SOURCE_USB)
-               ? "USB IN (USART3)"
-               : "XBee IN (USART6)";
+    return "UART4 IN";
 }
 
 UART_HandleTypeDef *downlink_input_source_get_active_uart(void)
 {
-    return (g_input_source_context.active_source == DOWNLINK_INPUT_SOURCE_USB)
-               ? &huart3
-               : &huart6;
+    return &huart4;
 }
 
 bool downlink_input_source_is_selected_uart(const UART_HandleTypeDef *huart)
 {
-    return huart == downlink_input_source_get_active_uart();
+    return huart == &huart4;
 }
 
 bool downlink_input_source_is_science_mode_enabled(void)
