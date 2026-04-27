@@ -332,6 +332,26 @@ static void pump_uplink_tx(void)
     }
 }
 
+static bool is_hex_digit(char c)
+{
+    return ((c >= '0') && (c <= '9')) ||
+           ((c >= 'A') && (c <= 'F')) ||
+           ((c >= 'a') && (c <= 'f'));
+}
+
+static unsigned long hex_digit_to_value(char c)
+{
+    if ((c >= '0') && (c <= '9')) {
+        return (unsigned long)(c - '0');
+    }
+
+    if ((c >= 'A') && (c <= 'F')) {
+        return (unsigned long)(c - 'A' + 10);
+    }
+
+    return (unsigned long)(c - 'a' + 10);
+}
+
 static bool validate_rover_line(const char *line)
 {
     const char *cursor = line;
@@ -353,16 +373,11 @@ static bool validate_rover_line(const char *line)
     while ((*cursor != '\0') && (*cursor != ',')) {
         const char c = *cursor;
 
-        if ((c >= '0') && (c <= '9')) {
-            can_id = (can_id * 16UL) + (unsigned long)(c - '0');
-        } else if ((c >= 'A') && (c <= 'F')) {
-            can_id = (can_id * 16UL) + (unsigned long)(c - 'A' + 10);
-        } else if ((c >= 'a') && (c <= 'f')) {
-            can_id = (can_id * 16UL) + (unsigned long)(c - 'a' + 10);
-        } else {
+        if (!is_hex_digit(c)) {
             return false;
         }
 
+        can_id = (can_id * 16UL) + hex_digit_to_value(c);
         cursor++;
     }
 
@@ -371,27 +386,11 @@ static bool validate_rover_line(const char *line)
     }
 
     cursor++;
-    if ((*cursor == '-') || (*cursor == '+')) {
-        cursor++;
-    }
     if (*cursor == '\0') {
         return false;
     }
 
-    while (*cursor != '\0') {
-        if ((*cursor < '0') || (*cursor > '9')) {
-            return false;
-        }
-
-        cursor++;
-    }
-
     return true;
-}
-
-static bool is_decimal_digit(char c)
-{
-    return (c >= '0') && (c <= '9');
 }
 
 static bool validate_science_mode_text_line(const char *line, char first_id_digit)
@@ -406,21 +405,13 @@ static bool validate_science_mode_text_line(const char *line, char first_id_digi
         return false;
     }
 
-    if (!is_decimal_digit(line[3]) || !is_decimal_digit(line[4]) ||
+    if (!is_hex_digit(line[3]) || !is_hex_digit(line[4]) ||
         (line[5] != ',')) {
         return false;
     }
 
     if (*payload == '\0') {
         return false;
-    }
-
-    while (*payload != '\0') {
-        if (((uint8_t)*payload < 0x20U) || ((uint8_t)*payload > 0x7EU)) {
-            return false;
-        }
-
-        payload++;
     }
 
     return true;
