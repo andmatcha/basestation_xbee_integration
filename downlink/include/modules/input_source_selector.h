@@ -7,8 +7,7 @@
 
 typedef enum
 {
-    DOWNLINK_INPUT_SOURCE_USB = 0,
-    DOWNLINK_INPUT_SOURCE_XBEE,
+    DOWNLINK_INPUT_SOURCE_LINK = 0,
 } DownlinkInputSource;
 
 void input_source_selector_init(void);

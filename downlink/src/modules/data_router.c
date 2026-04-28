@@ -8,11 +8,10 @@
 #include <stdbool.h>
 #include <string.h>
 
-#define ROVER_OUT_UART               huart2
-#define ARM_OUT_UART                 huart1
+#define ROVER_OUT_UART               huart1
+#define ARM_OUT_UART                 huart2
 #define SCIENCE_OUT_UART             huart2
-#define USB_IN_UART                  huart3
-#define XBEE_IN_UART                 huart6
+#define LINK_IN_UART                 huart4
 #define TEXT_PACKET_MAX_LEN          128U
 #define ROVER_PACKET_MAX_LEN         TEXT_PACKET_MAX_LEN
 #define SCIENCE_PACKET_MAX_LEN       TEXT_PACKET_MAX_LEN
@@ -29,13 +28,6 @@ typedef enum
 
 typedef enum
 {
-    UART_TRACE_SOURCE_NONE = 0,
-    UART_TRACE_SOURCE_USART6_IRQ,
-    UART_TRACE_SOURCE_DMA2_STREAM1_IRQ,
-} UartTraceSource;
-
-typedef enum
-{
     TEXT_PACKET_ROUTE_NONE = 0,
     TEXT_PACKET_ROUTE_ROVER,
     TEXT_PACKET_ROUTE_SCIENCE,
@@ -43,22 +35,10 @@ typedef enum
 
 typedef struct
 {
-    bool valid;
-    uint32_t sr;
-    uint32_t cr1;
-    uint32_t cr3;
-    HAL_UART_StateTypeDef rx_state;
-    uint16_t rx_xfer_count;
-} UartIrqSnapshot;
-
-typedef struct
-{
-    UART_HandleTypeDef *active_input_uart;
     bool science_mode_enabled;
     InputMode input_mode;
     bool rover_pending_j;
-    uint8_t usb_rx_char;
-    uint8_t xbee_rx_char;
+    uint8_t link_rx_char;
     uint8_t rover_rx_buf[ROVER_PACKET_MAX_LEN];
     uint16_t rover_rx_idx;
     bool text_line_overflow;
@@ -95,13 +75,10 @@ typedef struct
 } DataRouterContext;
 
 static DataRouterContext g_data_router;
-static volatile UartTraceSource g_uart_trace_source;
-static volatile UartIrqSnapshot g_usart6_irq_snapshot;
 
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
-extern UART_HandleTypeDef huart3;
-extern UART_HandleTypeDef huart6;
+extern UART_HandleTypeDef huart4;
 
 static uint32_t enter_critical_section(void)
 {
@@ -119,12 +96,8 @@ static void exit_critical_section(uint32_t primask)
 
 static uint8_t *get_rx_char_slot(UART_HandleTypeDef *huart)
 {
-    if (huart == &USB_IN_UART) {
-        return &g_data_router.usb_rx_char;
-    }
-
-    if (huart == &XBEE_IN_UART) {
-        return &g_data_router.xbee_rx_char;
+    if (huart == &LINK_IN_UART) {
+        return &g_data_router.link_rx_char;
     }
 
     return NULL;
@@ -133,19 +106,7 @@ static uint8_t *get_rx_char_slot(UART_HandleTypeDef *huart)
 #if DEBUG_LOG_ENABLED
 static const char *get_input_uart_name(const UART_HandleTypeDef *huart)
 {
-    return (huart == &USB_IN_UART) ? "USB IN (USART3)" : "XBee IN (USART6)";
-}
-
-static const char *get_uart_trace_source_name(void)
-{
-    switch (g_uart_trace_source) {
-    case UART_TRACE_SOURCE_USART6_IRQ:
-        return "USART6_IRQ";
-    case UART_TRACE_SOURCE_DMA2_STREAM1_IRQ:
-        return "DMA2_Stream1_IRQ";
-    default:
-        return "unknown";
-    }
+    return (huart == &LINK_IN_UART) ? "UART4 IN" : "unknown";
 }
 
 static void log_uart_status_flags(uint32_t status, const char *prefix)
@@ -186,8 +147,6 @@ static void log_uart_error_details(UART_HandleTypeDef *huart)
     const uint32_t cr1 = huart->Instance->CR1;
     const uint32_t cr3 = huart->Instance->CR3;
     const DMA_HandleTypeDef *hdmarx = huart->hdmarx;
-    const bool has_pre_irq_snapshot =
-        (huart == &XBEE_IN_UART) && g_usart6_irq_snapshot.valid;
 
     LOG("[downlink] uart error on %s: err=0x%08lX",
         get_input_uart_name(huart), (unsigned long)error);
@@ -214,15 +173,7 @@ static void log_uart_error_details(UART_HandleTypeDef *huart)
     LOG(" sr=0x%08lX", (unsigned long)status);
     log_uart_status_flags(status, "SR_");
 
-    if (has_pre_irq_snapshot) {
-        LOG(" pre_sr=0x%08lX",
-            (unsigned long)g_usart6_irq_snapshot.sr);
-        log_uart_status_flags(g_usart6_irq_snapshot.sr, "PRE_");
-    }
-
-    LOG(" selected=%u irq=%s cr1=0x%08lX cr3=0x%08lX rx_state=%lu",
-        downlink_input_source_is_selected_uart(huart) ? 1U : 0U,
-        get_uart_trace_source_name(),
+    LOG(" cr1=0x%08lX cr3=0x%08lX rx_state=%lu",
         (unsigned long)cr1,
         (unsigned long)cr3,
         (unsigned long)huart->RxState);
@@ -236,25 +187,12 @@ static void log_uart_error_details(UART_HandleTypeDef *huart)
             (unsigned long)hdmarx->Instance->FCR);
     }
 
-    if (has_pre_irq_snapshot) {
-        LOG(" pre_cr1=0x%08lX pre_cr3=0x%08lX pre_rx_state=%lu pre_rx_count=%u",
-            (unsigned long)g_usart6_irq_snapshot.cr1,
-            (unsigned long)g_usart6_irq_snapshot.cr3,
-            (unsigned long)g_usart6_irq_snapshot.rx_state,
-            (unsigned int)g_usart6_irq_snapshot.rx_xfer_count);
-    }
-
     LOG("\r\n");
 }
 #endif
 
 static uint32_t get_pre_irq_error_flags(const UART_HandleTypeDef *huart)
 {
-    if ((huart == &XBEE_IN_UART) && g_usart6_irq_snapshot.valid) {
-        return g_usart6_irq_snapshot.sr &
-               (USART_SR_PE | USART_SR_NE | USART_SR_FE | USART_SR_ORE);
-    }
-
     return huart->Instance->SR & (USART_SR_PE | USART_SR_NE | USART_SR_FE | USART_SR_ORE);
 }
 
@@ -664,35 +602,6 @@ static void sync_science_mode(void)
     exit_critical_section(primask);
 }
 
-static void sync_active_input_uart(bool log_change)
-{
-    UART_HandleTypeDef *active_uart = downlink_input_source_get_active_uart();
-    UART_HandleTypeDef *previous_uart;
-    bool changed = false;
-    uint32_t primask = enter_critical_section();
-
-    previous_uart = g_data_router.active_input_uart;
-    if (g_data_router.active_input_uart != active_uart) {
-        g_data_router.active_input_uart = active_uart;
-        reset_stream_parser();
-        changed = true;
-    }
-    exit_critical_section(primask);
-
-    if (changed) {
-        if (previous_uart != NULL) {
-            stop_receive_it(previous_uart);
-        }
-
-        restart_receive_it(active_uart);
-    }
-
-    if (changed && log_change) {
-        LOG("[downlink] router input -> %s\r\n",
-            downlink_input_source_get_current_name());
-    }
-}
-
 static void send_text_packet(const char *label,
                              UART_HandleTypeDef *huart,
                              const uint8_t *packet,
@@ -920,14 +829,9 @@ static void process_xbee_input_byte(uint8_t byte)
     filter_input_byte(byte);
 }
 
-static void process_selected_input_byte(UART_HandleTypeDef *huart, uint8_t byte)
+static void process_link_input_byte(uint8_t byte)
 {
-    if (huart == &XBEE_IN_UART) {
-        process_xbee_input_byte(byte);
-        return;
-    }
-
-    filter_input_byte(byte);
+    process_xbee_input_byte(byte);
 }
 
 void data_router_init(void)
@@ -935,9 +839,10 @@ void data_router_init(void)
     memset(&g_data_router, 0, sizeof(g_data_router));
     g_data_router.science_mode_enabled =
         downlink_input_source_is_science_mode_enabled();
-    g_uart_trace_source = UART_TRACE_SOURCE_NONE;
-    memset((void *)&g_usart6_irq_snapshot, 0, sizeof(g_usart6_irq_snapshot));
-    sync_active_input_uart(true);
+    reset_stream_parser();
+    restart_receive_it(&LINK_IN_UART);
+    LOG("[downlink] router input -> %s\r\n",
+        downlink_input_source_get_current_name());
 }
 
 void data_router_poll(void)
@@ -953,7 +858,6 @@ void data_router_poll(void)
     uint32_t primask;
 
     sync_science_mode();
-    sync_active_input_uart(true);
 
     primask = enter_critical_section();
     if (g_data_router.arm_packet_pending) {
@@ -1014,18 +918,13 @@ void data_router_on_uart_rx_complete(UART_HandleTypeDef *huart)
 
     received_byte = *rx_char;
     sync_science_mode();
-    sync_active_input_uart(false);
-
-    if (!downlink_input_source_is_selected_uart(huart)) {
-        return;
-    }
 
     if (huart->RxState == HAL_UART_STATE_READY) {
         restart_receive_it(huart);
     }
 
     status_leds_on_rx_activity();
-    process_selected_input_byte(huart, received_byte);
+    process_link_input_byte(received_byte);
 }
 
 void data_router_on_uart_error(UART_HandleTypeDef *huart)
@@ -1037,12 +936,6 @@ void data_router_on_uart_error(UART_HandleTypeDef *huart)
     }
 
     sync_science_mode();
-    sync_active_input_uart(false);
-
-    if (!downlink_input_source_is_selected_uart(huart)) {
-        stop_receive_it(huart);
-        return;
-    }
 
     if (is_nonblocking_line_error(pre_irq_error_flags)) {
         return;
@@ -1053,25 +946,4 @@ void data_router_on_uart_error(UART_HandleTypeDef *huart)
 #endif
     stop_receive_it(huart);
     restart_receive_it(huart);
-}
-
-void data_router_trace_usart6_irq_enter(void)
-{
-    g_uart_trace_source = UART_TRACE_SOURCE_USART6_IRQ;
-    g_usart6_irq_snapshot.valid = true;
-    g_usart6_irq_snapshot.sr = huart6.Instance->SR;
-    g_usart6_irq_snapshot.cr1 = huart6.Instance->CR1;
-    g_usart6_irq_snapshot.cr3 = huart6.Instance->CR3;
-    g_usart6_irq_snapshot.rx_state = huart6.RxState;
-    g_usart6_irq_snapshot.rx_xfer_count = huart6.RxXferCount;
-}
-
-void data_router_trace_dma2_stream1_irq_enter(void)
-{
-    g_uart_trace_source = UART_TRACE_SOURCE_DMA2_STREAM1_IRQ;
-}
-
-void data_router_trace_irq_exit(void)
-{
-    g_uart_trace_source = UART_TRACE_SOURCE_NONE;
 }

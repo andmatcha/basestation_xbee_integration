@@ -12,10 +12,15 @@
 
 #define ROVER_IN_UART                 huart1
 #define ARM_IN_UART                   huart2
+#define USB_IO_UART                   huart3
+#define XBEE_IO_UART                  huart6
+#define DOWNLINK_UART                 huart4
 #define ROVER_DMA_RX_BUFFER_SIZE      256U
 #define ARM_DMA_RX_BUFFER_SIZE        256U
+#define BRIDGE_DMA_RX_BUFFER_SIZE     256U
 #define UPLINK_TX_QUEUE_DEPTH         16U
 #define UPLINK_TX_FRAME_MAX_LEN       128U
+#define DOWNLINK_TX_QUEUE_SIZE        1024U
 #define TEXT_LINE_BUFFER_SIZE         127U
 
 typedef struct __attribute__((packed))
@@ -81,6 +86,16 @@ typedef struct
     volatile bool uplink_tx_busy;
     UART_HandleTypeDef *tx_uart;
     uint8_t uplink_tx_dma_buffer[UPLINK_TX_FRAME_MAX_LEN];
+    uint8_t usb_bridge_dma_rx_buffer[BRIDGE_DMA_RX_BUFFER_SIZE];
+    uint16_t usb_bridge_dma_last_pos;
+    uint8_t xbee_bridge_dma_rx_buffer[BRIDGE_DMA_RX_BUFFER_SIZE];
+    uint16_t xbee_bridge_dma_last_pos;
+    uint8_t downlink_tx_queue[DOWNLINK_TX_QUEUE_SIZE];
+    volatile uint16_t downlink_tx_head;
+    volatile uint16_t downlink_tx_tail;
+    volatile uint16_t downlink_tx_count;
+    volatile bool downlink_tx_busy;
+    uint8_t downlink_tx_byte;
 } DataRouterContext;
 
 static DataRouterContext g_data_router;
@@ -88,6 +103,7 @@ static DataRouterContext g_data_router;
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
 extern UART_HandleTypeDef huart3;
+extern UART_HandleTypeDef huart4;
 extern UART_HandleTypeDef huart6;
 
 static uint32_t enter_critical_section(void)
@@ -116,12 +132,16 @@ static const char *get_uart_name(const UART_HandleTypeDef *huart)
                                                   : "Arm IN (USART2)";
     }
 
-    if (huart == &huart3) {
+    if (huart == &USB_IO_UART) {
         return "USB OUT (USART3)";
     }
 
-    if (huart == &huart6) {
+    if (huart == &XBEE_IO_UART) {
         return "XBee OUT (USART6)";
+    }
+
+    if (huart == &DOWNLINK_UART) {
+        return "Downlink OUT (UART4)";
     }
 
     return "unknown";
@@ -130,7 +150,7 @@ static const char *get_uart_name(const UART_HandleTypeDef *huart)
 
 static bool is_output_uart(const UART_HandleTypeDef *huart)
 {
-    return (huart == &huart3) || (huart == &huart6);
+    return (huart == &USB_IO_UART) || (huart == &XBEE_IO_UART);
 }
 
 static void note_rx_activity(void)
@@ -159,9 +179,13 @@ static HAL_StatusTypeDef start_circular_reception(UART_HandleTypeDef *huart,
 
 static void restart_circular_reception(UART_HandleTypeDef *huart,
                                        uint8_t *buffer,
-                                       uint16_t size)
+                                       uint16_t size,
+                                       uint16_t *last_pos)
 {
     (void)HAL_UART_DMAStop(huart);
+    if (last_pos != NULL) {
+        *last_pos = 0U;
+    }
 
     if (start_circular_reception(huart, buffer, size) != HAL_OK) {
         Error_Handler();
@@ -370,6 +394,50 @@ static void pump_uplink_tx(void)
         primask = enter_critical_section();
         g_data_router.uplink_tx_busy = false;
         g_data_router.tx_uart = NULL;
+        exit_critical_section(primask);
+    }
+}
+
+static bool enqueue_downlink_byte(uint8_t byte)
+{
+    uint32_t primask = enter_critical_section();
+
+    if (g_data_router.downlink_tx_count >= DOWNLINK_TX_QUEUE_SIZE) {
+        exit_critical_section(primask);
+        return false;
+    }
+
+    g_data_router.downlink_tx_queue[g_data_router.downlink_tx_tail] = byte;
+    g_data_router.downlink_tx_tail =
+        (uint16_t)((g_data_router.downlink_tx_tail + 1U) %
+                   DOWNLINK_TX_QUEUE_SIZE);
+    g_data_router.downlink_tx_count++;
+    exit_critical_section(primask);
+    return true;
+}
+
+static void pump_downlink_tx(void)
+{
+    HAL_StatusTypeDef status;
+    uint32_t primask = enter_critical_section();
+
+    if (g_data_router.downlink_tx_busy ||
+        (g_data_router.downlink_tx_count == 0U)) {
+        exit_critical_section(primask);
+        return;
+    }
+
+    g_data_router.downlink_tx_byte =
+        g_data_router.downlink_tx_queue[g_data_router.downlink_tx_head];
+    g_data_router.downlink_tx_busy = true;
+    exit_critical_section(primask);
+
+    status = HAL_UART_Transmit_IT(&DOWNLINK_UART,
+                                  &g_data_router.downlink_tx_byte,
+                                  1U);
+    if (status != HAL_OK) {
+        primask = enter_critical_section();
+        g_data_router.downlink_tx_busy = false;
         exit_critical_section(primask);
     }
 }
@@ -635,6 +703,20 @@ static void consume_arm_byte(uint8_t byte)
     }
 }
 
+static void consume_bridge_byte(UART_HandleTypeDef *source_uart, uint8_t byte)
+{
+    note_rx_activity();
+
+    if (!enqueue_downlink_byte(byte)) {
+#if DEBUG_LOG_ENABLED
+        LOG("[uplink] downlink tx queue full; dropped byte from %s\r\n",
+            get_uart_name(source_uart));
+#else
+        (void)source_uart;
+#endif
+    }
+}
+
 static void poll_rover_dma_rx(void)
 {
     const uint16_t dma_pos =
@@ -697,6 +779,41 @@ static void poll_science_dma_rx(void)
     }
 }
 
+static void poll_bridge_dma_rx(UART_HandleTypeDef *huart,
+                               uint8_t *buffer,
+                               uint16_t buffer_size,
+                               uint16_t *last_pos)
+{
+    const uint16_t dma_pos = get_dma_rx_pos(huart, buffer_size);
+
+    while (*last_pos != dma_pos) {
+        consume_bridge_byte(huart, buffer[*last_pos]);
+
+        (*last_pos)++;
+        if (*last_pos >= buffer_size) {
+            *last_pos = 0U;
+        }
+    }
+}
+
+static void restart_bridge_reception(UART_HandleTypeDef *huart)
+{
+    if (huart == &USB_IO_UART) {
+        restart_circular_reception(&USB_IO_UART,
+                                   g_data_router.usb_bridge_dma_rx_buffer,
+                                   sizeof(g_data_router.usb_bridge_dma_rx_buffer),
+                                   &g_data_router.usb_bridge_dma_last_pos);
+        return;
+    }
+
+    if (huart == &XBEE_IO_UART) {
+        restart_circular_reception(&XBEE_IO_UART,
+                                   g_data_router.xbee_bridge_dma_rx_buffer,
+                                   sizeof(g_data_router.xbee_bridge_dma_rx_buffer),
+                                   &g_data_router.xbee_bridge_dma_last_pos);
+    }
+}
+
 void data_router_init(void)
 {
     memset(&g_data_router, 0, sizeof(g_data_router));
@@ -714,6 +831,20 @@ void data_router_init(void)
                                  sizeof(g_data_router.arm_dma_rx_buffer)) != HAL_OK) {
         Error_Handler();
     }
+
+    if (start_circular_reception(&USB_IO_UART,
+                                 g_data_router.usb_bridge_dma_rx_buffer,
+                                 sizeof(g_data_router.usb_bridge_dma_rx_buffer)) != HAL_OK) {
+        Error_Handler();
+    }
+
+    if (start_circular_reception(&XBEE_IO_UART,
+                                 g_data_router.xbee_bridge_dma_rx_buffer,
+                                 sizeof(g_data_router.xbee_bridge_dma_rx_buffer)) != HAL_OK) {
+        Error_Handler();
+    }
+
+    LOG("[uplink] bridge USART3/USART6 RX -> UART4 TX\r\n");
 }
 
 void data_router_poll(void)
@@ -726,7 +857,16 @@ void data_router_poll(void)
     } else {
         poll_arm_dma_rx();
     }
+    poll_bridge_dma_rx(&USB_IO_UART,
+                       g_data_router.usb_bridge_dma_rx_buffer,
+                       sizeof(g_data_router.usb_bridge_dma_rx_buffer),
+                       &g_data_router.usb_bridge_dma_last_pos);
+    poll_bridge_dma_rx(&XBEE_IO_UART,
+                       g_data_router.xbee_bridge_dma_rx_buffer,
+                       sizeof(g_data_router.xbee_bridge_dma_rx_buffer),
+                       &g_data_router.xbee_bridge_dma_last_pos);
     pump_uplink_tx();
+    pump_downlink_tx();
 }
 
 void data_router_on_uart_rx_complete(UART_HandleTypeDef *huart)
@@ -738,6 +878,21 @@ void data_router_on_uart_tx_complete(UART_HandleTypeDef *huart)
 {
     uint32_t primask;
 
+    if (huart == &DOWNLINK_UART) {
+        primask = enter_critical_section();
+        if (g_data_router.downlink_tx_count > 0U) {
+            g_data_router.downlink_tx_head =
+                (uint16_t)((g_data_router.downlink_tx_head + 1U) %
+                           DOWNLINK_TX_QUEUE_SIZE);
+            g_data_router.downlink_tx_count--;
+        }
+        g_data_router.downlink_tx_busy = false;
+        exit_critical_section(primask);
+
+        pump_downlink_tx();
+        return;
+    }
+
     if (huart != g_data_router.tx_uart) {
         return;
     }
@@ -747,6 +902,8 @@ void data_router_on_uart_tx_complete(UART_HandleTypeDef *huart)
     g_data_router.uplink_tx_busy = false;
     g_data_router.tx_uart = NULL;
     exit_critical_section(primask);
+
+    pump_uplink_tx();
 }
 
 void data_router_on_uart_error(UART_HandleTypeDef *huart)
@@ -760,35 +917,54 @@ void data_router_on_uart_error(UART_HandleTypeDef *huart)
 #endif
 
     if (huart == &ROVER_IN_UART) {
-        g_data_router.rover_dma_last_pos = 0U;
         reset_text_line_receiver(&g_data_router.rover_line_index,
                                  &g_data_router.rover_line_overflow);
         restart_circular_reception(&ROVER_IN_UART, g_data_router.rover_dma_rx_buffer,
-                                   sizeof(g_data_router.rover_dma_rx_buffer));
+                                   sizeof(g_data_router.rover_dma_rx_buffer),
+                                   &g_data_router.rover_dma_last_pos);
         return;
     }
 
     if (huart == &ARM_IN_UART) {
-        g_data_router.arm_dma_last_pos = 0U;
         reset_text_line_receiver(&g_data_router.science_line_index,
                                  &g_data_router.science_line_overflow);
         g_data_router.arm_packet_index = 0U;
         g_data_router.arm_rx_state = ARM_SYNC_WAIT_A;
         restart_circular_reception(&ARM_IN_UART, g_data_router.arm_dma_rx_buffer,
-                                   sizeof(g_data_router.arm_dma_rx_buffer));
+                                   sizeof(g_data_router.arm_dma_rx_buffer),
+                                   &g_data_router.arm_dma_last_pos);
         return;
     }
 
-    if (!is_output_uart(huart)) {
+    if (is_output_uart(huart)) {
+        restart_bridge_reception(huart);
+
+        primask = enter_critical_section();
+        if (huart == g_data_router.tx_uart) {
+            g_data_router.uplink_tx_busy = false;
+            g_data_router.tx_uart = NULL;
+        }
+        exit_critical_section(primask);
+        pump_uplink_tx();
         return;
     }
 
-    (void)HAL_UART_DMAStop(huart);
+    if (huart != &DOWNLINK_UART) {
+        return;
+    }
+
+    (void)HAL_UART_AbortTransmit(&DOWNLINK_UART);
 
     primask = enter_critical_section();
-    if (huart == g_data_router.tx_uart) {
-        g_data_router.uplink_tx_busy = false;
-        g_data_router.tx_uart = NULL;
+    if (g_data_router.downlink_tx_busy &&
+        (g_data_router.downlink_tx_count > 0U)) {
+        g_data_router.downlink_tx_head =
+            (uint16_t)((g_data_router.downlink_tx_head + 1U) %
+                       DOWNLINK_TX_QUEUE_SIZE);
+        g_data_router.downlink_tx_count--;
     }
+    g_data_router.downlink_tx_busy = false;
     exit_critical_section(primask);
+
+    pump_downlink_tx();
 }
