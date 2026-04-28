@@ -60,6 +60,7 @@
 2. 先頭ヘッダ `AC` を削除し、変換後パケット種別を表す 1 バイトの ASCII 文字へ置き換える。
 3. パケット種別ごとの削除対象フィールドを削除する。
 4. 削除対象外のバイトを元の順序で詰め、変換後パケットとして XBee へ送信する。
+5. 末尾 2 バイトの `crc16` は、変換後パケットの先頭から CRC 直前までのバイト列に対して CRC-16/CCITT-FALSE を再計算し、Little Endian で格納する。
 
 ## 削減方針まとめ
 
@@ -85,7 +86,7 @@
 | `base_target_mm_j0` | `31~32` | 削除 | 削除 | 保持 |
 | `auto_flags` | `33~34` | 削除 | 削除 | 保持 |
 | `fault_code` | `35~36` | 削除 | 削除 | 削除 |
-| `crc16` | `37~38` | 保持 | 保持 | 保持 |
+| `crc16` | `37~38` | 再計算値へ置換 | 再計算値へ置換 | 再計算値へ置換 |
 
 ## M パケット
 
@@ -93,7 +94,8 @@
 
 ### 保持する情報
 
-Manual 制御で必要な 7 軸 current、共有 `control_byte`、連番 `seq`、元 `AC v6` の `crc16` を保持する。
+Manual 制御で必要な 7 軸 current、共有 `control_byte`、連番 `seq` を保持する。
+末尾の `crc16` は変換後 byte `0~16` に対して再計算した値を格納する。
 
 ### 削除する情報
 
@@ -116,7 +118,7 @@ Manual 制御で必要な 7 軸 current、共有 `control_byte`、連番 `seq`�
 | `12~13` | `14~15` | `current[5]` | M5 GripperRoll current |
 | `14~15` | `16~17` | `current[6]` | M6 Gripper current |
 | `16` | `30` | `control_byte` | 共有制御ビット |
-| `17~18` | `37~38` | `crc16` | 元 `AC v6` の CRC |
+| `17~18` | 生成 | `crc16` | 変換後 byte `0~16` の CRC |
 
 変換後サイズは 19 バイト。
 
@@ -126,7 +128,8 @@ Manual 制御で必要な 7 軸 current、共有 `control_byte`、連番 `seq`�
 
 ### 保持する情報
 
-IK 制御で使う M0/M1/M5/M6 の current、M2/M3/M4 の encoder14 angle、共有 `control_byte`、連番 `seq`、元 `AC v6` の `crc16` を保持する。
+IK 制御で使う M0/M1/M5/M6 の current、M2/M3/M4 の encoder14 angle、共有 `control_byte`、連番 `seq` を保持する。
+末尾の `crc16` は変換後 byte `0~16` に対して再計算した値を格納する。
 
 ### 削除する情報
 
@@ -149,7 +152,7 @@ IK 制御で使う M0/M1/M5/M6 の current、M2/M3/M4 の encoder14 angle、共�
 | `12~13` | `20~21` | `angle[1]` | M3 encoder14 count |
 | `14~15` | `22~23` | `angle[2]` | M4 encoder14 count |
 | `16` | `30` | `control_byte` | 共有制御ビット |
-| `17~18` | `37~38` | `crc16` | 元 `AC v6` の CRC |
+| `17~18` | 生成 | `crc16` | 変換後 byte `0~16` の CRC |
 
 変換後サイズは 19 バイト。
 
@@ -159,7 +162,8 @@ IK 制御で使う M0/M1/M5/M6 の current、M2/M3/M4 の encoder14 angle、共�
 
 ### 保持する情報
 
-Keyboard Auto で使う M2/M3/M4 の encoder14 angle、共有 `control_byte`、J0 絶対目標位置 `base_target_mm_j0`、状態フラグ `auto_flags`、連番 `seq`、元 `AC v6` の `crc16` を保持する。
+Keyboard Auto で使う M2/M3/M4 の encoder14 angle、共有 `control_byte`、J0 絶対目標位置 `base_target_mm_j0`、状態フラグ `auto_flags`、連番 `seq` を保持する。
+末尾の `crc16` は変換後 byte `0~12` に対して再計算した値を格納する。
 
 ### 削除する情報
 
@@ -180,7 +184,7 @@ Keyboard Auto で使う M2/M3/M4 の encoder14 angle、共有 `control_byte`、J
 | `8` | `30` | `control_byte` | 共有制御ビット |
 | `9~10` | `31~32` | `base_target_mm_j0` | keyboard auto の J0 絶対目標位置 mm |
 | `11~12` | `33~34` | `auto_flags` | keyboard auto 状態フラグ |
-| `13~14` | `37~38` | `crc16` | 元 `AC v6` の CRC |
+| `13~14` | 生成 | `crc16` | 変換後 byte `0~12` の CRC |
 
 変換後サイズは 15 バイト。
 
@@ -189,4 +193,5 @@ Keyboard Auto で使う M2/M3/M4 の encoder14 angle、共有 `control_byte`、J
 - 制御モード判定は、バイト削除やヘッダ置換を行う前の `AC v6` に対して実施する。
 - 削除範囲は変換前 `AC v6` の byte 位置で判定する。
 - 実装では元の `AC v6` を読みながら保持対象だけを出力バッファへコピーすると、インデックスずれを避けやすい。
-- `crc16` は元 `AC v6` の値を保持する。縮小後のバイト列に対して CRC を再計算する必要がある場合は、別途仕様化する。
+- `crc16` は元 `AC v6` の値をコピーせず、縮小後のバイト列に対して再計算する。
+- CRC 計算範囲は、M/I パケットでは先頭 17 バイト、B パケットでは先頭 13 バイトとする。

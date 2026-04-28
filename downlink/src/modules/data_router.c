@@ -8,8 +8,8 @@
 #include <stdbool.h>
 #include <string.h>
 
-#define ROVER_OUT_UART               huart1
-#define ARM_OUT_UART                 huart2
+#define ROVER_OUT_UART               huart2
+#define ARM_OUT_UART                 huart1
 #define SCIENCE_OUT_UART             huart2
 #define USB_IN_UART                  huart3
 #define XBEE_IN_UART                 huart6

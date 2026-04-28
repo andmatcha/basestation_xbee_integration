@@ -70,6 +70,25 @@ static const AcPacketReductionProfile reduction_profiles[] = {
     },
 };
 
+static uint16_t crc16_ccitt_false(const uint8_t *data, size_t len)
+{
+    uint16_t crc = 0xFFFFU;
+
+    for (size_t i = 0U; i < len; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+
+        for (uint8_t bit = 0U; bit < 8U; bit++) {
+            if ((crc & 0x8000U) != 0U) {
+                crc = (uint16_t)((crc << 1) ^ 0x1021U);
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+
+    return crc;
+}
+
 static bool is_index_in_range(uint8_t index, const AcPacketByteRange *range)
 {
     return (index >= range->first) && (index <= range->last);
@@ -158,6 +177,12 @@ AcPacketReducerResult ac_packet_reducer_reduce_for_xbee(const uint8_t *ac_packet
         if (!is_deleted_index(i, profile)) {
             output[out_index++] = ac_packet[i];
         }
+    }
+
+    {
+        const uint16_t crc = crc16_ccitt_false(output, out_index - sizeof(uint16_t));
+        output[out_index - 2U] = (uint8_t)(crc & 0xFFU);
+        output[out_index - 1U] = (uint8_t)(crc >> 8);
     }
 
     if (output_len != NULL) {
