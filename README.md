@@ -10,6 +10,9 @@
 - `USART3`: USB IN
 - `USART6`: XBee IN
 
+XBee は transparent mode 前提で扱い、API frame の `0x7E` delimiter 解析や
+7-bit/mask 変換は行わない。
+
 出力先は次の 2 系統。
 
 - `USART1`: Rover OUT
