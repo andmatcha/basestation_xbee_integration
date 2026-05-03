@@ -38,6 +38,7 @@ typedef struct
     bool science_mode_enabled;
     InputMode input_mode;
     bool rover_pending_j;
+    bool rover_pending_j_sync_only;
     uint8_t link_rx_char;
     uint8_t rover_rx_buf[ROVER_PACKET_MAX_LEN];
     uint16_t rover_rx_idx;
@@ -345,6 +346,25 @@ static unsigned long hex_digit_to_value(uint8_t byte)
     return (unsigned long)(byte - 'a' + 10U);
 }
 
+static uint16_t crc16_ccitt_false(const uint8_t *data, uint16_t length)
+{
+    uint16_t crc = 0xFFFFU;
+
+    for (uint16_t i = 0U; i < length; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+
+        for (uint8_t bit = 0U; bit < 8U; bit++) {
+            if ((crc & 0x8000U) != 0U) {
+                crc = (uint16_t)((crc << 1) ^ 0x1021U);
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+
+    return crc;
+}
+
 static bool validate_rover_packet(const uint8_t *packet, uint16_t length)
 {
     uint16_t idx = 2U;
@@ -387,6 +407,34 @@ static bool validate_rover_packet(const uint8_t *packet, uint16_t length)
     return true;
 }
 
+static bool validate_arm_packet(const uint8_t *packet)
+{
+    const uint16_t crc_calc = crc16_ccitt_false(packet, ARM_PACKET_JF_SIZE - 2U);
+    const uint16_t crc_packet =
+        (uint16_t)packet[ARM_PACKET_JF_SIZE - 2U] |
+        ((uint16_t)packet[ARM_PACKET_JF_SIZE - 1U] << 8);
+
+    return (packet[0] == 'J') && (packet[1] == 'F') &&
+           (crc_calc == crc_packet);
+}
+
+static uint16_t find_next_arm_sync_offset(const uint8_t *packet,
+                                          uint16_t length,
+                                          uint16_t start_offset)
+{
+    if (length < 2U) {
+        return length;
+    }
+
+    for (uint16_t i = start_offset; (i + 1U) < length; i++) {
+        if ((packet[i] == 'J') && (packet[i + 1U] == 'F')) {
+            return i;
+        }
+    }
+
+    return length;
+}
+
 static void update_jf_pair_counter(uint8_t byte, bool *has_prev,
                                    uint8_t *previous_byte,
                                    uint16_t *jf_pair_count)
@@ -426,6 +474,7 @@ static void reset_xbee_filtered_stream_state(void)
 {
     g_data_router.input_mode = INPUT_MODE_ROVER;
     g_data_router.rover_pending_j = false;
+    g_data_router.rover_pending_j_sync_only = false;
     g_data_router.rover_rx_idx = 0U;
     g_data_router.text_line_overflow = false;
     g_data_router.arm_packet_rx_idx = 0U;
@@ -654,9 +703,61 @@ static void send_arm_packet(const uint8_t *packet)
                       HAL_MAX_DELAY);
 }
 
+static void start_arm_packet(void)
+{
+    g_data_router.rover_pending_j = false;
+    g_data_router.rover_pending_j_sync_only = false;
+    g_data_router.rover_rx_idx = 0U;
+    g_data_router.text_line_overflow = false;
+    g_data_router.arm_packet_rx_buf[0] = 'J';
+    g_data_router.arm_packet_rx_buf[1] = 'F';
+    g_data_router.arm_packet_rx_idx = 2U;
+    g_data_router.input_mode = INPUT_MODE_ARM;
+}
+
+static void discard_invalid_arm_packet_or_resync(void)
+{
+    const uint16_t sync_offset =
+        find_next_arm_sync_offset(g_data_router.arm_packet_rx_buf,
+                                  g_data_router.arm_packet_rx_idx, 1U);
+
+#if DEBUG_LOG_ENABLED
+    LOG("[downlink] arm rejected %u bytes:", ARM_PACKET_JF_SIZE);
+    for (uint16_t i = 0U; i < ARM_PACKET_JF_SIZE; i++) {
+        LOG(" %02X", g_data_router.arm_packet_rx_buf[i]);
+    }
+    if (sync_offset < g_data_router.arm_packet_rx_idx) {
+        LOG(" (crc mismatch; resync offset=%u)\r\n", sync_offset);
+    } else {
+        LOG(" (crc mismatch; no sync)\r\n");
+    }
+#endif
+
+    if (sync_offset < g_data_router.arm_packet_rx_idx) {
+        const uint16_t remaining =
+            (uint16_t)(g_data_router.arm_packet_rx_idx - sync_offset);
+        memmove(g_data_router.arm_packet_rx_buf,
+                &g_data_router.arm_packet_rx_buf[sync_offset], remaining);
+        g_data_router.arm_packet_rx_idx = remaining;
+        g_data_router.input_mode = INPUT_MODE_ARM;
+        return;
+    }
+
+    g_data_router.rover_pending_j =
+        (g_data_router.arm_packet_rx_buf[g_data_router.arm_packet_rx_idx - 1U] == 'J');
+    g_data_router.rover_pending_j_sync_only = g_data_router.rover_pending_j;
+    g_data_router.arm_packet_rx_idx = 0U;
+    g_data_router.input_mode = INPUT_MODE_ROVER;
+}
+
 static void queue_arm_packet_if_ready(void)
 {
     if (g_data_router.arm_packet_rx_idx < ARM_PACKET_JF_SIZE) {
+        return;
+    }
+
+    if (!validate_arm_packet(g_data_router.arm_packet_rx_buf)) {
+        discard_invalid_arm_packet_or_resync();
         return;
     }
 
@@ -749,25 +850,27 @@ static void filter_normal_mode_input_byte(uint8_t byte)
     }
 
     if (g_data_router.rover_pending_j) {
+        const bool sync_only = g_data_router.rover_pending_j_sync_only;
+
         g_data_router.rover_pending_j = false;
+        g_data_router.rover_pending_j_sync_only = false;
 
         if (byte == 'F') {
-            g_data_router.arm_packet_rx_buf[0] = 'J';
-            g_data_router.arm_packet_rx_buf[1] = 'F';
-            g_data_router.arm_packet_rx_idx = 2U;
-            g_data_router.input_mode = INPUT_MODE_ARM;
+            start_arm_packet();
             return;
         }
 
-        if (g_data_router.rover_rx_idx < ROVER_PACKET_MAX_LEN) {
+        if (!sync_only && (g_data_router.rover_rx_idx > 0U) &&
+            (g_data_router.rover_rx_idx < ROVER_PACKET_MAX_LEN)) {
             g_data_router.rover_rx_buf[g_data_router.rover_rx_idx++] = 'J';
-        } else {
+        } else if (!sync_only && (g_data_router.rover_rx_idx > 0U)) {
             g_data_router.rover_rx_idx = 0U;
         }
     }
 
-    if ((byte == 'J') && (g_data_router.rover_rx_idx == 0U)) {
+    if (byte == 'J') {
         g_data_router.rover_pending_j = true;
+        g_data_router.rover_pending_j_sync_only = false;
         return;
     }
 
@@ -777,6 +880,10 @@ static void filter_normal_mode_input_byte(uint8_t byte)
     }
 
     if (byte == '\r') {
+        return;
+    }
+
+    if ((g_data_router.rover_rx_idx == 0U) && (byte != '0')) {
         return;
     }
 
