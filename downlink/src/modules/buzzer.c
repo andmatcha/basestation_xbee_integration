@@ -23,6 +23,12 @@ static BuzzerContext g_buzzer;
 
 extern TIM_HandleTypeDef htim13;
 
+static void buzzer_apply_timer_update(void)
+{
+    BUZZER_TIMER.Instance->EGR = TIM_EGR_UG;
+    __HAL_TIM_CLEAR_FLAG(&BUZZER_TIMER, TIM_FLAG_UPDATE);
+}
+
 static uint32_t get_tim13_input_clock_hz(void)
 {
     uint32_t pclk1_hz = HAL_RCC_GetPCLK1Freq();
@@ -38,6 +44,7 @@ static void buzzer_set_silent(void)
 {
     __HAL_TIM_SET_COMPARE(&BUZZER_TIMER, BUZZER_TIMER_CHANNEL, 0U);
     __HAL_TIM_SET_COUNTER(&BUZZER_TIMER, 0U);
+    buzzer_apply_timer_update();
 }
 
 static void buzzer_set_frequency(uint32_t frequency_hz)
@@ -54,7 +61,8 @@ static void buzzer_set_frequency(uint32_t frequency_hz)
         Error_Handler();
     }
 
-    period_ticks = g_buzzer.counter_clock_hz / frequency_hz;
+    period_ticks =
+        (g_buzzer.counter_clock_hz + (frequency_hz / 2U)) / frequency_hz;
     if (period_ticks < BUZZER_MIN_PERIOD_TICKS) {
         period_ticks = BUZZER_MIN_PERIOD_TICKS;
     }
@@ -66,6 +74,7 @@ static void buzzer_set_frequency(uint32_t frequency_hz)
     __HAL_TIM_SET_AUTORELOAD(&BUZZER_TIMER, auto_reload);
     __HAL_TIM_SET_COMPARE(&BUZZER_TIMER, BUZZER_TIMER_CHANNEL, period_ticks / 2U);
     __HAL_TIM_SET_COUNTER(&BUZZER_TIMER, 0U);
+    buzzer_apply_timer_update();
 }
 
 void buzzer_init(void)
