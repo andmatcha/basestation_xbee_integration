@@ -12,11 +12,11 @@
 #define RGB_LED_BITS_PER_LED             24U
 #define RGB_LED_RESET_SLOTS              60U
 #define RGB_LED_BUFFER_SIZE              ((RGB_LED_COUNT * RGB_LED_BITS_PER_LED) + RGB_LED_RESET_SLOTS)
-#define RGB_LED_TIMER_CLOCK_HZ           16000000U
+#define RGB_LED_TIMER_CLOCK_HZ           80000000U
 #define RGB_LED_SIGNAL_FREQ_HZ           800000U
 #define RGB_LED_PERIOD_TICKS             (RGB_LED_TIMER_CLOCK_HZ / RGB_LED_SIGNAL_FREQ_HZ)
-#define RGB_LED_DUTY_0                   7U
-#define RGB_LED_DUTY_1                   13U
+#define RGB_LED_DUTY_0                   ((RGB_LED_PERIOD_TICKS * 35U) / 100U)
+#define RGB_LED_DUTY_1                   ((RGB_LED_PERIOD_TICKS * 65U) / 100U)
 #define RGB_LED_MAX_BRIGHTNESS_PERCENT   50U
 
 typedef struct
