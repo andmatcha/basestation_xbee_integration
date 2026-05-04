@@ -59,8 +59,16 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define Push_Switch_Pin GPIO_PIN_13
-#define Push_Switch_GPIO_Port GPIOC
+#define PUSH_SWITCH_1_Pin GPIO_PIN_13
+#define PUSH_SWITCH_1_GPIO_Port GPIOC
+#define PUSH_SWITCH_2_Pin GPIO_PIN_14
+#define PUSH_SWITCH_2_GPIO_Port GPIOC
+#define RSSI_PWM_Pin GPIO_PIN_0
+#define RSSI_PWM_GPIO_Port GPIOA
+#define BUZZER_PWM_Pin GPIO_PIN_6
+#define BUZZER_PWM_GPIO_Port GPIOA
+#define LCD_RESET_Pin GPIO_PIN_7
+#define LCD_RESET_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 
