@@ -38,7 +38,7 @@ static display_manager_context_t g_display;
 
 static GPIO_PinState read_display_switch(void)
 {
-    return HAL_GPIO_ReadPin(Push_Switch_2_GPIO_Port, Push_Switch_2_Pin);
+    return HAL_GPIO_ReadPin(PUSH_SWITCH_2_GPIO_Port, PUSH_SWITCH_2_Pin);
 }
 
 static bool has_elapsed(uint32_t start_ms, uint32_t duration_ms)
@@ -204,7 +204,7 @@ void display_manager_init(I2C_HandleTypeDef *hi2c)
     g_display.startup_until_ms = now_ms + DISPLAY_STARTUP_MS;
     g_display.last_refresh_ms = 0U;
 
-    if (lcd_driver_init(hi2c, LCD_Reset_GPIO_Port, LCD_Reset_Pin) != HAL_OK) {
+    if (lcd_driver_init(hi2c, LCD_RESET_GPIO_Port, LCD_RESET_Pin) != HAL_OK) {
         LOG("[integrated] lcd init failed\r\n");
         g_display.error = true;
         return;

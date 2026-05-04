@@ -27,7 +27,7 @@ extern UART_HandleTypeDef huart6;
 
 static GPIO_PinState read_mode_switch(void)
 {
-    return HAL_GPIO_ReadPin(Push_Switch_1_GPIO_Port, Push_Switch_1_Pin);
+    return HAL_GPIO_ReadPin(PUSH_SWITCH_1_GPIO_Port, PUSH_SWITCH_1_Pin);
 }
 
 static bool has_elapsed(uint32_t start_ms, uint32_t duration_ms)
