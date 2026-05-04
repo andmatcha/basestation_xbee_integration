@@ -88,7 +88,7 @@ void mode_control_init(void)
     const GPIO_PinState level = read_mode_switch();
 
     g_mode.module_mode = MODULE_MODE_ARM;
-    g_mode.xbee_mode = XBEE_MODE_ONBOARD;
+    g_mode.xbee_mode = XBEE_MODE_EXTERNAL;
     g_mode.last_sampled_level = level;
     g_mode.stable_level = level;
     g_mode.last_transition_ms = now_ms;
