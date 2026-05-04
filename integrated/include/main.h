@@ -59,12 +59,8 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define Push_Switch_1_Pin GPIO_PIN_13
-#define Push_Switch_1_GPIO_Port GPIOC
-#define Push_Switch_2_Pin GPIO_PIN_14
-#define Push_Switch_2_GPIO_Port GPIOC
-#define LCD_Reset_Pin GPIO_PIN_7
-#define LCD_Reset_GPIO_Port GPIOB
+#define Push_Switch_Pin GPIO_PIN_13
+#define Push_Switch_GPIO_Port GPIOC
 
 /* USER CODE BEGIN Private defines */
 
