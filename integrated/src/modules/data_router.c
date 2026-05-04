@@ -2,6 +2,7 @@
 
 #include "debug_log.h"
 #include "main.h"
+#include "modules/ac_packet_reducer.h"
 #include "modules/display_manager.h"
 #include "modules/link_stats.h"
 #include "modules/mode_control.h"
@@ -42,6 +43,9 @@ typedef struct __attribute__((packed))
     uint16_t fault_code;
     uint16_t crc16;
 } PacketAC_v6;
+
+typedef char packet_ac_v6_size_must_match_reducer[
+    (sizeof(PacketAC_v6) == AC_PACKET_REDUCER_AC_PACKET_LEN) ? 1 : -1];
 
 typedef enum
 {
@@ -324,6 +328,8 @@ static void tx_channel_pump(tx_channel_t *channel, UART_HandleTypeDef *selected_
     UART_HandleTypeDef *uart;
     uint16_t frame_len;
     frame_type_t frame_type;
+    ac_packet_reducer_result_t reduce_result = AC_PACKET_REDUCER_RESULT_OK;
+    bool dropped_frame = false;
     uint32_t primask;
 
     if (channel == NULL) {
@@ -343,7 +349,37 @@ static void tx_channel_pump(tx_channel_t *channel, UART_HandleTypeDef *selected_
 
     frame_len = channel->queue[channel->head].len;
     frame_type = (frame_type_t)channel->queue[channel->head].type;
-    memcpy(channel->dma_buffer, channel->queue[channel->head].data, frame_len);
+
+    if (frame_type == FRAME_TYPE_UPLINK_ARM_AC) {
+        size_t reduced_len = 0U;
+
+        reduce_result = ac_packet_reducer_reduce_for_xbee(
+            channel->queue[channel->head].data,
+            frame_len,
+            channel->dma_buffer,
+            sizeof(channel->dma_buffer),
+            &reduced_len);
+
+        if (reduce_result == AC_PACKET_REDUCER_RESULT_OK) {
+            frame_len = (uint16_t)reduced_len;
+        } else {
+            if (channel->count > 0U) {
+                channel->head = (uint16_t)((channel->head + 1U) % TX_QUEUE_DEPTH);
+                channel->count--;
+            }
+            dropped_frame = true;
+        }
+    } else {
+        memcpy(channel->dma_buffer, channel->queue[channel->head].data, frame_len);
+    }
+
+    if (dropped_frame) {
+        exit_critical_section(primask);
+        LOG("[integrated] dropped arm AC packet before XBee tx: %s\r\n",
+            ac_packet_reducer_result_name(reduce_result));
+        return;
+    }
+
     channel->busy = true;
     channel->tx_uart = uart;
     channel->current_type = (uint8_t)frame_type;
