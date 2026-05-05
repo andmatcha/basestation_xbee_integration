@@ -58,8 +58,16 @@ static void build_status_lines(char *line0, char *line1)
 static void build_rate_lines(char *line0, char *line1)
 {
     const link_stat_snapshot_t rf = link_stats_get_snapshot(LINK_STAT_RF);
-    const link_stat_snapshot_t uplink = link_stats_get_snapshot(LINK_STAT_UPLINK);
-    const link_stat_snapshot_t downlink = link_stats_get_snapshot(LINK_STAT_DOWNLINK);
+    const link_stat_snapshot_t rover_uplink =
+        link_stats_get_snapshot(LINK_STAT_ROVER_UPLINK);
+    const link_stat_snapshot_t rover_downlink =
+        link_stats_get_snapshot(LINK_STAT_ROVER_DOWNLINK);
+    const link_stat_snapshot_t module_uplink =
+        link_stats_get_snapshot(LINK_STAT_MODULE_UPLINK);
+    const link_stat_snapshot_t module_downlink =
+        link_stats_get_snapshot(LINK_STAT_MODULE_DOWNLINK);
+    const char *module_label =
+        (mode_control_get_module_mode() == MODULE_MODE_SCIENCE) ? "S" : "A";
     char tx_part[8];
     char rx_part[8];
 
@@ -69,11 +77,12 @@ static void build_rate_lines(char *line0, char *line1)
                    "RF:%s/%s", tx_part, rx_part);
     pad_line(line0);
 
-    (void)snprintf(line1, DISPLAY_VIEW_LINE_LEN + 1U, "U:%lu/%lu D:%lu/%lu",
-                   (unsigned long)clamp_rate_99(uplink.tx_hz),
-                   (unsigned long)clamp_rate_99(uplink.rx_hz),
-                   (unsigned long)clamp_rate_99(downlink.tx_hz),
-                   (unsigned long)clamp_rate_99(downlink.rx_hz));
+    (void)snprintf(line1, DISPLAY_VIEW_LINE_LEN + 1U, "R:%lu/%lu %s:%lu/%lu",
+                   (unsigned long)clamp_rate_99(rover_uplink.rx_hz),
+                   (unsigned long)clamp_rate_99(rover_downlink.rx_hz),
+                   module_label,
+                   (unsigned long)clamp_rate_99(module_uplink.rx_hz),
+                   (unsigned long)clamp_rate_99(module_downlink.rx_hz));
     pad_line(line1);
 }
 

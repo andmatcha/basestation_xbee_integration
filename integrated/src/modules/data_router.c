@@ -172,9 +172,113 @@ static void note_uplink_status(link_stat_status_t status)
     link_stats_note_status(LINK_STAT_UPLINK, status);
 }
 
+static void note_rover_uplink_status(link_stat_status_t status)
+{
+    note_uplink_status(status);
+    link_stats_note_status(LINK_STAT_ROVER_UPLINK, status);
+}
+
+static void note_module_uplink_status(link_stat_status_t status)
+{
+    note_uplink_status(status);
+    link_stats_note_status(LINK_STAT_MODULE_UPLINK, status);
+}
+
+static void note_uplink_frame_status(frame_type_t type, link_stat_status_t status)
+{
+    switch (type) {
+    case FRAME_TYPE_UPLINK_ROVER:
+        note_rover_uplink_status(status);
+        break;
+    case FRAME_TYPE_UPLINK_ARM_AC:
+    case FRAME_TYPE_UPLINK_ARM_JF:
+    case FRAME_TYPE_UPLINK_SCIENCE_TEXT:
+        note_module_uplink_status(status);
+        break;
+    default:
+        note_uplink_status(status);
+        break;
+    }
+}
+
+static void note_uplink_frame_rx(frame_type_t type)
+{
+    switch (type) {
+    case FRAME_TYPE_UPLINK_ROVER:
+        link_stats_note_rx(LINK_STAT_ROVER_UPLINK);
+        break;
+    case FRAME_TYPE_UPLINK_ARM_AC:
+    case FRAME_TYPE_UPLINK_ARM_JF:
+    case FRAME_TYPE_UPLINK_SCIENCE_TEXT:
+        link_stats_note_rx(LINK_STAT_MODULE_UPLINK);
+        break;
+    default:
+        break;
+    }
+}
+
+static void note_uplink_frame_tx(frame_type_t type)
+{
+    switch (type) {
+    case FRAME_TYPE_UPLINK_ROVER:
+        link_stats_note_tx(LINK_STAT_ROVER_UPLINK);
+        break;
+    case FRAME_TYPE_UPLINK_ARM_AC:
+    case FRAME_TYPE_UPLINK_ARM_JF:
+    case FRAME_TYPE_UPLINK_SCIENCE_TEXT:
+        link_stats_note_tx(LINK_STAT_MODULE_UPLINK);
+        break;
+    default:
+        break;
+    }
+}
+
 static void note_downlink_status(link_stat_status_t status)
 {
     link_stats_note_status(LINK_STAT_DOWNLINK, status);
+}
+
+static void note_rover_downlink_status(link_stat_status_t status)
+{
+    note_downlink_status(status);
+    link_stats_note_status(LINK_STAT_ROVER_DOWNLINK, status);
+}
+
+static void note_module_downlink_status(link_stat_status_t status)
+{
+    note_downlink_status(status);
+    link_stats_note_status(LINK_STAT_MODULE_DOWNLINK, status);
+}
+
+static void note_downlink_frame_status(frame_type_t type, link_stat_status_t status)
+{
+    switch (type) {
+    case FRAME_TYPE_DOWNLINK_ROVER:
+        note_rover_downlink_status(status);
+        break;
+    case FRAME_TYPE_DOWNLINK_ARM:
+    case FRAME_TYPE_DOWNLINK_SCIENCE_TEXT:
+        note_module_downlink_status(status);
+        break;
+    default:
+        note_downlink_status(status);
+        break;
+    }
+}
+
+static void note_downlink_frame_tx(frame_type_t type)
+{
+    switch (type) {
+    case FRAME_TYPE_DOWNLINK_ROVER:
+        link_stats_note_tx(LINK_STAT_ROVER_DOWNLINK);
+        break;
+    case FRAME_TYPE_DOWNLINK_ARM:
+    case FRAME_TYPE_DOWNLINK_SCIENCE_TEXT:
+        link_stats_note_tx(LINK_STAT_MODULE_DOWNLINK);
+        break;
+    default:
+        break;
+    }
 }
 
 static void note_tx_error_status(frame_type_t type)
@@ -184,12 +288,12 @@ static void note_tx_error_status(frame_type_t type)
     case FRAME_TYPE_UPLINK_ARM_AC:
     case FRAME_TYPE_UPLINK_ARM_JF:
     case FRAME_TYPE_UPLINK_SCIENCE_TEXT:
-        note_uplink_status(LINK_STAT_STATUS_ERROR);
+        note_uplink_frame_status(type, LINK_STAT_STATUS_ERROR);
         break;
     case FRAME_TYPE_DOWNLINK_ROVER:
     case FRAME_TYPE_DOWNLINK_ARM:
     case FRAME_TYPE_DOWNLINK_SCIENCE_TEXT:
-        note_downlink_status(LINK_STAT_STATUS_ERROR);
+        note_downlink_frame_status(type, LINK_STAT_STATUS_ERROR);
         break;
     default:
         break;
@@ -305,7 +409,8 @@ static void note_tx_start(frame_type_t type, const UART_HandleTypeDef *huart,
     case FRAME_TYPE_UPLINK_ROVER:
         link_stats_note_tx(LINK_STAT_RF);
         link_stats_note_tx(LINK_STAT_UPLINK);
-        note_uplink_status(LINK_STAT_STATUS_OK);
+        note_uplink_frame_tx(type);
+        note_uplink_frame_status(type, LINK_STAT_STATUS_OK);
         LOG("[integrated] uplink rover tx -> %s len=%u\r\n",
             get_uart_name(huart), (unsigned int)len);
         break;
@@ -314,27 +419,31 @@ static void note_tx_start(frame_type_t type, const UART_HandleTypeDef *huart,
     case FRAME_TYPE_UPLINK_SCIENCE_TEXT:
         link_stats_note_tx(LINK_STAT_RF);
         link_stats_note_tx(LINK_STAT_UPLINK);
-        note_uplink_status(LINK_STAT_STATUS_OK);
+        note_uplink_frame_tx(type);
+        note_uplink_frame_status(type, LINK_STAT_STATUS_OK);
         LOG("[integrated] uplink %s tx -> %s len=%u\r\n",
             mode_control_get_module_name(),
             get_uart_name(huart), (unsigned int)len);
         break;
     case FRAME_TYPE_DOWNLINK_ROVER:
         link_stats_note_tx(LINK_STAT_DOWNLINK);
-        note_downlink_status(LINK_STAT_STATUS_OK);
+        note_downlink_frame_tx(type);
+        note_downlink_frame_status(type, LINK_STAT_STATUS_OK);
         LOG("[integrated] downlink rover tx -> %s len=%u\r\n",
             get_uart_name(huart), (unsigned int)len);
         break;
     case FRAME_TYPE_DOWNLINK_ARM:
         link_stats_note_tx(LINK_STAT_DOWNLINK);
-        note_downlink_status(LINK_STAT_STATUS_OK);
+        note_downlink_frame_tx(type);
+        note_downlink_frame_status(type, LINK_STAT_STATUS_OK);
         LOG("[integrated] downlink %s tx -> %s len=%u\r\n",
             mode_control_get_module_name(),
             get_uart_name(huart), (unsigned int)len);
         break;
     case FRAME_TYPE_DOWNLINK_SCIENCE_TEXT:
         link_stats_note_tx(LINK_STAT_DOWNLINK);
-        note_downlink_status(LINK_STAT_STATUS_OK);
+        note_downlink_frame_tx(type);
+        note_downlink_frame_status(type, LINK_STAT_STATUS_OK);
         LOG("[integrated] downlink science text tx -> %s len=%u\r\n",
             get_uart_name(huart), (unsigned int)len);
         break;
@@ -395,7 +504,7 @@ static void tx_channel_pump(tx_channel_t *channel, UART_HandleTypeDef *selected_
 
     if (dropped_frame) {
         exit_critical_section(primask);
-        note_uplink_status(LINK_STAT_STATUS_ERROR);
+        note_uplink_frame_status(frame_type, LINK_STAT_STATUS_ERROR);
         LOG("[integrated] dropped arm AC packet before XBee tx: %s\r\n",
             ac_packet_reducer_result_name(reduce_result));
         return;
@@ -618,13 +727,14 @@ static void enqueue_uplink_frame(frame_type_t type, const uint8_t *data,
 {
     if (!tx_channel_enqueue(&g_router.xbee_tx, type, data, len)) {
         LOG("[integrated] uplink tx queue full\r\n");
-        note_uplink_status(LINK_STAT_STATUS_QUEUE_FULL);
+        note_uplink_frame_status(type, LINK_STAT_STATUS_QUEUE_FULL);
         report_error();
         return;
     }
 
     link_stats_note_rx(LINK_STAT_UPLINK);
-    note_uplink_status(LINK_STAT_STATUS_OK);
+    note_uplink_frame_rx(type);
+    note_uplink_frame_status(type, LINK_STAT_STATUS_OK);
 }
 
 static void enqueue_text_uplink_frame(frame_type_t type,
@@ -636,7 +746,7 @@ static void enqueue_text_uplink_frame(frame_type_t type,
     if ((line_len + 2U) > sizeof(tx_frame)) {
         LOG("[integrated] text uplink line too long len=%u\r\n",
             (unsigned int)line_len);
-        note_uplink_status(LINK_STAT_STATUS_OVERFLOW);
+        note_uplink_frame_status(type, LINK_STAT_STATUS_OVERFLOW);
         return;
     }
 
@@ -680,16 +790,16 @@ static void consume_rover_uplink_byte(uint8_t byte)
                                          g_router.rover_line_len)) {
             LOG("[integrated] science uplink packet on rover port len=%u\r\n",
                 (unsigned int)g_router.rover_line_len);
-            note_uplink_status(LINK_STAT_STATUS_WRONG_PORT);
+            note_rover_uplink_status(LINK_STAT_STATUS_WRONG_PORT);
         } else if ((g_router.rover_line[0] == 'A') ||
                    (g_router.rover_line[0] == 'J')) {
             LOG("[integrated] module uplink packet on rover port len=%u\r\n",
                 (unsigned int)g_router.rover_line_len);
-            note_uplink_status(LINK_STAT_STATUS_WRONG_PORT);
+            note_rover_uplink_status(LINK_STAT_STATUS_WRONG_PORT);
         } else {
             LOG("[integrated] rover uplink rejected len=%u\r\n",
                 (unsigned int)g_router.rover_line_len);
-            note_uplink_status(LINK_STAT_STATUS_FORMAT);
+            note_rover_uplink_status(LINK_STAT_STATUS_FORMAT);
         }
 
         g_router.rover_line_len = 0U;
@@ -704,15 +814,15 @@ static void consume_rover_uplink_byte(uint8_t byte)
         g_router.rover_line_len = 0U;
         g_router.rover_line_overflow = true;
         LOG("[integrated] rover uplink line overflow\r\n");
-        note_uplink_status(LINK_STAT_STATUS_OVERFLOW);
+        note_rover_uplink_status(LINK_STAT_STATUS_OVERFLOW);
         return;
     }
 
     if (g_router.rover_line_len == 0U) {
         if ((byte == 'A') || (byte == 'J')) {
-            note_uplink_status(LINK_STAT_STATUS_WRONG_PORT);
+            note_rover_uplink_status(LINK_STAT_STATUS_WRONG_PORT);
         } else if (byte != '0') {
-            note_uplink_status(LINK_STAT_STATUS_FORMAT);
+            note_rover_uplink_status(LINK_STAT_STATUS_FORMAT);
         }
     }
 
@@ -760,16 +870,16 @@ static void consume_science_uplink_byte(uint8_t byte)
                        g_router.science_line_len)) {
             LOG("[integrated] rover uplink packet on module port len=%u\r\n",
                 (unsigned int)g_router.science_line_len);
-            note_uplink_status(LINK_STAT_STATUS_WRONG_PORT);
+            note_module_uplink_status(LINK_STAT_STATUS_WRONG_PORT);
         } else if ((g_router.science_line[0] == 'A') ||
                    (g_router.science_line[0] == 'J')) {
             LOG("[integrated] arm uplink packet on science port len=%u\r\n",
                 (unsigned int)g_router.science_line_len);
-            note_uplink_status(LINK_STAT_STATUS_WRONG_PORT);
+            note_module_uplink_status(LINK_STAT_STATUS_WRONG_PORT);
         } else {
             LOG("[integrated] science uplink rejected len=%u\r\n",
                 (unsigned int)g_router.science_line_len);
-            note_uplink_status(LINK_STAT_STATUS_FORMAT);
+            note_module_uplink_status(LINK_STAT_STATUS_FORMAT);
         }
 
         g_router.science_line_len = 0U;
@@ -784,15 +894,15 @@ static void consume_science_uplink_byte(uint8_t byte)
         g_router.science_line_len = 0U;
         g_router.science_line_overflow = true;
         LOG("[integrated] science uplink line overflow\r\n");
-        note_uplink_status(LINK_STAT_STATUS_OVERFLOW);
+        note_module_uplink_status(LINK_STAT_STATUS_OVERFLOW);
         return;
     }
 
     if (g_router.science_line_len == 0U) {
         if ((byte == 'A') || (byte == 'J')) {
-            note_uplink_status(LINK_STAT_STATUS_WRONG_PORT);
+            note_module_uplink_status(LINK_STAT_STATUS_WRONG_PORT);
         } else if (byte != '0') {
-            note_uplink_status(LINK_STAT_STATUS_FORMAT);
+            note_module_uplink_status(LINK_STAT_STATUS_FORMAT);
         }
     }
 
@@ -819,9 +929,9 @@ static void consume_module_uplink_byte(uint8_t byte)
         } else if ((byte == '0') || (byte == 'x') || (byte == 'X') ||
                    (byte == ',') || (byte == '-') || (byte == '+') ||
                    is_hex_digit(byte)) {
-            note_uplink_status(LINK_STAT_STATUS_WRONG_PORT);
+            note_module_uplink_status(LINK_STAT_STATUS_WRONG_PORT);
         } else {
-            note_uplink_status(LINK_STAT_STATUS_FORMAT);
+            note_module_uplink_status(LINK_STAT_STATUS_FORMAT);
         }
         break;
 
@@ -837,7 +947,7 @@ static void consume_module_uplink_byte(uint8_t byte)
             g_router.arm_packet_len = 1U;
             g_router.arm_rx_state = ARM_SYNC_WAIT_JF_F;
         } else {
-            note_uplink_status(LINK_STAT_STATUS_SYNC);
+            note_module_uplink_status(LINK_STAT_STATUS_SYNC);
             reset_module_uplink_parser();
         }
         break;
@@ -854,7 +964,7 @@ static void consume_module_uplink_byte(uint8_t byte)
             g_router.arm_packet_len = 1U;
             g_router.arm_rx_state = ARM_SYNC_WAIT_AC_C;
         } else {
-            note_uplink_status(LINK_STAT_STATUS_SYNC);
+            note_module_uplink_status(LINK_STAT_STATUS_SYNC);
             reset_module_uplink_parser();
         }
         break;
@@ -869,7 +979,7 @@ static void consume_module_uplink_byte(uint8_t byte)
             } else {
                 LOG("[integrated] %s AC packet rejected by crc\r\n",
                     mode_control_get_module_name());
-                note_uplink_status(LINK_STAT_STATUS_CRC);
+                note_module_uplink_status(LINK_STAT_STATUS_CRC);
             }
             reset_module_uplink_parser();
         }
@@ -929,11 +1039,34 @@ static void reset_xbee_downlink_parser(void)
     g_router.xbee_arm_len = 0U;
 }
 
-static void note_xbee_packet_rx(void)
+static void note_xbee_packet_rx(link_stat_port_t downlink_port)
 {
     link_stats_note_rx(LINK_STAT_RF);
     link_stats_note_rx(LINK_STAT_DOWNLINK);
+    link_stats_note_rx(downlink_port);
     note_downlink_status(LINK_STAT_STATUS_OK);
+    link_stats_note_status(downlink_port, LINK_STAT_STATUS_OK);
+}
+
+static void note_science_mode_downlink_status(const uint8_t *packet,
+                                              uint16_t len,
+                                              link_stat_status_t status)
+{
+    if ((len > 2U) &&
+        (packet[0] == '0') &&
+        ((packet[1] == 'x') || (packet[1] == 'X'))) {
+        if (packet[2] == '5') {
+            note_module_downlink_status(status);
+            return;
+        }
+
+        if ((packet[2] == '3') || (packet[2] == '4')) {
+            note_rover_downlink_status(status);
+            return;
+        }
+    }
+
+    note_downlink_status(status);
 }
 
 static void route_downlink_rover_packet(const uint8_t *packet, uint16_t len)
@@ -942,7 +1075,7 @@ static void route_downlink_rover_packet(const uint8_t *packet, uint16_t len)
 
     if (!validate_rover_text(packet, len)) {
         LOG("[integrated] rover downlink rejected len=%u\r\n", (unsigned int)len);
-        note_downlink_status(LINK_STAT_STATUS_FORMAT);
+        note_rover_downlink_status(LINK_STAT_STATUS_FORMAT);
         return;
     }
 
@@ -953,12 +1086,12 @@ static void route_downlink_rover_packet(const uint8_t *packet, uint16_t len)
     if (!tx_channel_enqueue(&g_router.rover_out_tx, FRAME_TYPE_DOWNLINK_ROVER,
                             tx_frame, (uint16_t)(len + 2U))) {
         LOG("[integrated] rover downlink tx queue full\r\n");
-        note_downlink_status(LINK_STAT_STATUS_QUEUE_FULL);
+        note_rover_downlink_status(LINK_STAT_STATUS_QUEUE_FULL);
         report_error();
         return;
     }
 
-    note_xbee_packet_rx();
+    note_xbee_packet_rx(LINK_STAT_ROVER_DOWNLINK);
 }
 
 static void route_downlink_science_mode_text_packet(const uint8_t *packet, uint16_t len)
@@ -972,14 +1105,14 @@ static void route_downlink_science_mode_text_packet(const uint8_t *packet, uint1
     if (route == TEXT_PACKET_ROUTE_NONE) {
         LOG("[integrated] science-mode downlink rejected len=%u\r\n",
             (unsigned int)len);
-        note_downlink_status(LINK_STAT_STATUS_FORMAT);
+        note_science_mode_downlink_status(packet, len, LINK_STAT_STATUS_FORMAT);
         return;
     }
 
     if ((len + 2U) > sizeof(tx_frame)) {
         LOG("[integrated] science-mode downlink too long len=%u\r\n",
             (unsigned int)len);
-        note_downlink_status(LINK_STAT_STATUS_OVERFLOW);
+        note_science_mode_downlink_status(packet, len, LINK_STAT_STATUS_OVERFLOW);
         return;
     }
 
@@ -998,12 +1131,14 @@ static void route_downlink_science_mode_text_packet(const uint8_t *packet, uint1
     if (!tx_channel_enqueue(tx_channel, frame_type, tx_frame,
                             (uint16_t)(len + 2U))) {
         LOG("[integrated] science-mode downlink tx queue full\r\n");
-        note_downlink_status(LINK_STAT_STATUS_QUEUE_FULL);
+        note_downlink_frame_status(frame_type, LINK_STAT_STATUS_QUEUE_FULL);
         report_error();
         return;
     }
 
-    note_xbee_packet_rx();
+    note_xbee_packet_rx((route == TEXT_PACKET_ROUTE_SCIENCE)
+                            ? LINK_STAT_MODULE_DOWNLINK
+                            : LINK_STAT_ROVER_DOWNLINK);
 }
 
 static void route_downlink_arm_packet(const uint8_t *packet)
@@ -1011,12 +1146,12 @@ static void route_downlink_arm_packet(const uint8_t *packet)
     if (!tx_channel_enqueue(&g_router.rover_out_tx, FRAME_TYPE_DOWNLINK_ARM,
                             packet, ARM_PACKET_JF_SIZE)) {
         LOG("[integrated] arm downlink tx queue full\r\n");
-        note_downlink_status(LINK_STAT_STATUS_QUEUE_FULL);
+        note_module_downlink_status(LINK_STAT_STATUS_QUEUE_FULL);
         report_error();
         return;
     }
 
-    note_xbee_packet_rx();
+    note_xbee_packet_rx(LINK_STAT_MODULE_DOWNLINK);
 }
 
 static bool validate_jf_arm_packet(const uint8_t *packet)
@@ -1068,7 +1203,7 @@ static void discard_invalid_xbee_arm_packet_or_resync(void)
 
     LOG("[integrated] arm downlink rejected by crc len=%u\r\n",
         (unsigned int)g_router.xbee_arm_len);
-    note_downlink_status(LINK_STAT_STATUS_CRC);
+    note_module_downlink_status(LINK_STAT_STATUS_CRC);
 
     if (sync_offset < g_router.xbee_arm_len) {
         const uint16_t remaining =
@@ -1147,9 +1282,11 @@ static void filter_xbee_science_payload_byte(uint8_t byte)
         return;
     }
 
+    note_science_mode_downlink_status(g_router.xbee_rover_buf,
+                                      g_router.xbee_rover_len,
+                                      LINK_STAT_STATUS_OVERFLOW);
     g_router.xbee_rover_len = 0U;
     g_router.xbee_text_overflow = true;
-    note_downlink_status(LINK_STAT_STATUS_OVERFLOW);
 }
 
 static void filter_xbee_payload_byte(uint8_t byte)
@@ -1181,7 +1318,7 @@ static void filter_xbee_payload_byte(uint8_t byte)
             g_router.xbee_rover_buf[g_router.xbee_rover_len++] = 'J';
         } else if (!sync_only && (g_router.xbee_rover_len > 0U)) {
             g_router.xbee_rover_len = 0U;
-            note_downlink_status(LINK_STAT_STATUS_OVERFLOW);
+            note_rover_downlink_status(LINK_STAT_STATUS_OVERFLOW);
         }
     }
 
@@ -1211,7 +1348,7 @@ static void filter_xbee_payload_byte(uint8_t byte)
     }
 
     g_router.xbee_rover_len = 0U;
-    note_downlink_status(LINK_STAT_STATUS_OVERFLOW);
+    note_rover_downlink_status(LINK_STAT_STATUS_OVERFLOW);
 }
 
 static void process_xbee_input_byte(uint8_t byte)
