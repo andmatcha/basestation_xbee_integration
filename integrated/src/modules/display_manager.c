@@ -59,23 +59,6 @@ static void pad_line(char *line)
     line[DISPLAY_LINE_LEN] = '\0';
 }
 
-static const char *get_activity_code(const link_stat_snapshot_t *snapshot)
-{
-    if (snapshot->tx_active && snapshot->rx_active) {
-        return "TR";
-    }
-
-    if (snapshot->tx_active) {
-        return "TX";
-    }
-
-    if (snapshot->rx_active) {
-        return "RX";
-    }
-
-    return "--";
-}
-
 static uint32_t clamp_rate_999(uint32_t rate)
 {
     return (rate > 999U) ? 999U : rate;
@@ -101,19 +84,14 @@ static void format_rf_rate_part(char *buffer, size_t size,
 
 static void build_status_lines(char *line0, char *line1)
 {
-    const link_stat_snapshot_t rf = link_stats_get_snapshot(LINK_STAT_RF);
-    const link_stat_snapshot_t uplink = link_stats_get_snapshot(LINK_STAT_UPLINK);
-    const link_stat_snapshot_t downlink = link_stats_get_snapshot(LINK_STAT_DOWNLINK);
-
     (void)snprintf(line0, DISPLAY_LINE_LEN + 1U, "%s %s",
                    mode_control_get_module_name(),
                    mode_control_get_xbee_name());
     pad_line(line0);
 
-    (void)snprintf(line1, DISPLAY_LINE_LEN + 1U, "RF:%s U:%s D:%s",
-                   get_activity_code(&rf),
-                   get_activity_code(&uplink),
-                   get_activity_code(&downlink));
+    (void)snprintf(line1, DISPLAY_LINE_LEN + 1U, "UP:%s DOWN:%s",
+                   link_stats_get_status_code(LINK_STAT_UPLINK),
+                   link_stats_get_status_code(LINK_STAT_DOWNLINK));
     pad_line(line1);
 }
 

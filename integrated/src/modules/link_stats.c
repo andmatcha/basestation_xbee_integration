@@ -17,6 +17,8 @@ typedef struct
     uint32_t rx_hz;
     uint32_t last_tx_ms;
     uint32_t last_rx_ms;
+    uint32_t last_status_ms;
+    link_stat_status_t status;
 } link_stat_counter_t;
 
 typedef struct
@@ -89,6 +91,16 @@ void link_stats_note_rx(link_stat_port_t port)
     g_stats.ports[port].last_rx_ms = now_ms;
 }
 
+void link_stats_note_status(link_stat_port_t port, link_stat_status_t status)
+{
+    if (!is_valid_port(port)) {
+        return;
+    }
+
+    g_stats.ports[port].status = status;
+    g_stats.ports[port].last_status_ms = HAL_GetTick();
+}
+
 link_stat_snapshot_t link_stats_get_snapshot(link_stat_port_t port)
 {
     link_stat_snapshot_t snapshot = {0U, 0U, false, false};
@@ -110,4 +122,42 @@ link_stat_snapshot_t link_stats_get_snapshot(link_stat_port_t port)
         ((now_ms - counter->last_rx_ms) <= LINK_STATS_ACTIVITY_HOLD_MS);
 
     return snapshot;
+}
+
+const char *link_stats_get_status_code(link_stat_port_t port)
+{
+    const uint32_t now_ms = HAL_GetTick();
+    const link_stat_counter_t *counter;
+
+    if (!is_valid_port(port)) {
+        return "--";
+    }
+
+    counter = &g_stats.ports[port];
+    if ((counter->last_status_ms == 0U) ||
+        ((now_ms - counter->last_status_ms) > LINK_STATS_ACTIVITY_HOLD_MS)) {
+        return "--";
+    }
+
+    switch (counter->status) {
+    case LINK_STAT_STATUS_OK:
+        return "OK";
+    case LINK_STAT_STATUS_FORMAT:
+        return "FM";
+    case LINK_STAT_STATUS_WRONG_PORT:
+        return "WP";
+    case LINK_STAT_STATUS_SYNC:
+        return "SY";
+    case LINK_STAT_STATUS_CRC:
+        return "CR";
+    case LINK_STAT_STATUS_OVERFLOW:
+        return "OF";
+    case LINK_STAT_STATUS_QUEUE_FULL:
+        return "QF";
+    case LINK_STAT_STATUS_ERROR:
+        return "ER";
+    case LINK_STAT_STATUS_NONE:
+    default:
+        return "--";
+    }
 }
