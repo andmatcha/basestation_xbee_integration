@@ -115,15 +115,9 @@ void buzzer_play_startup_melody(void)
         BUZZER_NOTE_WITH_REST(BUZZER_PITCH_E5,
                               BUZZER_EIGHTH_NOTE_MS(BUZZER_STARTUP_BPM),
                               BUZZER_STARTUP_GAP_MS),
-<<<<<<< HEAD
-        BUZZER_NOTE_WITH_REST(BUZZER_PITCH_G5,
-                              BUZZER_EIGHTH_NOTE_MS(BUZZER_STARTUP_BPM),
-                              BUZZER_STARTUP_GAP_MS)
-=======
         BUZZER_NOTE(BUZZER_PITCH_G5,
                     BUZZER_DOTTED_NOTE_MS(
                         BUZZER_EIGHTH_NOTE_MS(BUZZER_STARTUP_BPM))),
->>>>>>> main
     };
 
     buzzer_play_melody(startup_melody,
