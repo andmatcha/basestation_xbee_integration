@@ -81,13 +81,8 @@ static rgb_led_color_t lerp_color(rgb_led_color_t start, rgb_led_color_t end,
 
 static rgb_led_color_t get_mode_led_color(uint32_t now_ms)
 {
-    rgb_led_color_t base_color;
-
-    if (downlink_input_source_get_current() == DOWNLINK_INPUT_SOURCE_USB) {
-        base_color = make_color(MODE_LED_USB_RED, MODE_LED_USB_GREEN, MODE_LED_USB_BLUE);
-    } else {
-        base_color = make_color(MODE_LED_XBEE_RED, MODE_LED_XBEE_GREEN, MODE_LED_XBEE_BLUE);
-    }
+    rgb_led_color_t base_color =
+        make_color(MODE_LED_XBEE_RED, MODE_LED_XBEE_GREEN, MODE_LED_XBEE_BLUE);
 
     if (!downlink_input_source_is_science_mode_enabled()) {
         return base_color;
