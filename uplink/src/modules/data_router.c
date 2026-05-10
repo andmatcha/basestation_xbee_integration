@@ -2,6 +2,7 @@
 
 #include "debug_log.h"
 #include "main.h"
+#include "modules/ac_packet_reducer.h"
 #include "modules/output_source_selector.h"
 #include "modules/status_leds.h"
 
@@ -11,11 +12,16 @@
 
 #define ROVER_IN_UART                 huart1
 #define ARM_IN_UART                   huart2
+#define USB_IO_UART                   huart3
+#define XBEE_IO_UART                  huart6
+#define DOWNLINK_UART                 huart4
 #define ROVER_DMA_RX_BUFFER_SIZE      256U
 #define ARM_DMA_RX_BUFFER_SIZE        256U
-#define ROVER_LINE_MAX_LEN            96U
+#define BRIDGE_DMA_RX_BUFFER_SIZE     256U
 #define UPLINK_TX_QUEUE_DEPTH         16U
 #define UPLINK_TX_FRAME_MAX_LEN       128U
+#define DOWNLINK_TX_QUEUE_SIZE        1024U
+#define TEXT_LINE_BUFFER_SIZE         127U
 
 typedef struct __attribute__((packed))
 {
@@ -31,6 +37,9 @@ typedef struct __attribute__((packed))
     uint16_t fault_code;
     uint16_t crc16;
 } PacketAC_v6;
+
+typedef char PacketAC_v6_size_must_match_reducer[
+    (sizeof(PacketAC_v6) == AC_PACKET_REDUCER_AC_PACKET_LEN) ? 1 : -1];
 
 typedef struct
 {
@@ -50,18 +59,23 @@ typedef enum
 {
     UPLINK_TX_FRAME_TYPE_ROVER = 0,
     UPLINK_TX_FRAME_TYPE_ARM,
+    UPLINK_TX_FRAME_TYPE_SCIENCE,
 } UplinkTxFrameType;
 
 typedef struct
 {
     UART_HandleTypeDef *active_output_uart;
+    bool science_mode_enabled;
     uint8_t rover_dma_rx_buffer[ROVER_DMA_RX_BUFFER_SIZE];
     uint16_t rover_dma_last_pos;
-    char rover_line_buffer[ROVER_LINE_MAX_LEN];
+    char rover_line_buffer[TEXT_LINE_BUFFER_SIZE];
     uint16_t rover_line_index;
     bool rover_line_overflow;
     uint8_t arm_dma_rx_buffer[ARM_DMA_RX_BUFFER_SIZE];
     uint16_t arm_dma_last_pos;
+    char science_line_buffer[TEXT_LINE_BUFFER_SIZE];
+    uint16_t science_line_index;
+    bool science_line_overflow;
     uint8_t arm_packet_buffer[sizeof(PacketAC_v6)];
     uint16_t arm_packet_index;
     ArmRxState arm_rx_state;
@@ -72,6 +86,16 @@ typedef struct
     volatile bool uplink_tx_busy;
     UART_HandleTypeDef *tx_uart;
     uint8_t uplink_tx_dma_buffer[UPLINK_TX_FRAME_MAX_LEN];
+    uint8_t usb_bridge_dma_rx_buffer[BRIDGE_DMA_RX_BUFFER_SIZE];
+    uint16_t usb_bridge_dma_last_pos;
+    uint8_t xbee_bridge_dma_rx_buffer[BRIDGE_DMA_RX_BUFFER_SIZE];
+    uint16_t xbee_bridge_dma_last_pos;
+    uint8_t downlink_tx_queue[DOWNLINK_TX_QUEUE_SIZE];
+    volatile uint16_t downlink_tx_head;
+    volatile uint16_t downlink_tx_tail;
+    volatile uint16_t downlink_tx_count;
+    volatile bool downlink_tx_busy;
+    uint8_t downlink_tx_byte;
 } DataRouterContext;
 
 static DataRouterContext g_data_router;
@@ -79,6 +103,7 @@ static DataRouterContext g_data_router;
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
 extern UART_HandleTypeDef huart3;
+extern UART_HandleTypeDef huart4;
 extern UART_HandleTypeDef huart6;
 
 static uint32_t enter_critical_section(void)
@@ -103,15 +128,20 @@ static const char *get_uart_name(const UART_HandleTypeDef *huart)
     }
 
     if (huart == &ARM_IN_UART) {
-        return "Arm IN (USART2)";
+        return g_data_router.science_mode_enabled ? "Science IN (USART2)"
+                                                  : "Arm IN (USART2)";
     }
 
-    if (huart == &huart3) {
+    if (huart == &USB_IO_UART) {
         return "USB OUT (USART3)";
     }
 
-    if (huart == &huart6) {
+    if (huart == &XBEE_IO_UART) {
         return "XBee OUT (USART6)";
+    }
+
+    if (huart == &DOWNLINK_UART) {
+        return "Downlink OUT (UART4)";
     }
 
     return "unknown";
@@ -120,12 +150,17 @@ static const char *get_uart_name(const UART_HandleTypeDef *huart)
 
 static bool is_output_uart(const UART_HandleTypeDef *huart)
 {
-    return (huart == &huart3) || (huart == &huart6);
+    return (huart == &USB_IO_UART) || (huart == &XBEE_IO_UART);
 }
 
 static void note_rx_activity(void)
 {
     status_leds_on_rx_activity();
+}
+
+static uint16_t get_dma_rx_pos(const UART_HandleTypeDef *huart, uint16_t size)
+{
+    return (uint16_t)(size - __HAL_DMA_GET_COUNTER(huart->hdmarx));
 }
 
 static HAL_StatusTypeDef start_circular_reception(UART_HandleTypeDef *huart,
@@ -144,9 +179,13 @@ static HAL_StatusTypeDef start_circular_reception(UART_HandleTypeDef *huart,
 
 static void restart_circular_reception(UART_HandleTypeDef *huart,
                                        uint8_t *buffer,
-                                       uint16_t size)
+                                       uint16_t size,
+                                       uint16_t *last_pos)
 {
     (void)HAL_UART_DMAStop(huart);
+    if (last_pos != NULL) {
+        *last_pos = 0U;
+    }
 
     if (start_circular_reception(huart, buffer, size) != HAL_OK) {
         Error_Handler();
@@ -169,6 +208,34 @@ static void sync_active_output_uart(bool log_change)
         LOG("[uplink] router output -> %s\r\n",
             uplink_output_source_get_current_name());
     }
+}
+
+static void reset_text_line_receiver(uint16_t *index, bool *overflow)
+{
+    *index = 0U;
+    *overflow = false;
+}
+
+static void sync_science_mode(void)
+{
+    const bool science_mode_enabled =
+        uplink_output_source_is_science_mode_enabled();
+
+    if (g_data_router.science_mode_enabled == science_mode_enabled) {
+        return;
+    }
+
+    g_data_router.science_mode_enabled = science_mode_enabled;
+    reset_text_line_receiver(&g_data_router.rover_line_index,
+                             &g_data_router.rover_line_overflow);
+    reset_text_line_receiver(&g_data_router.science_line_index,
+                             &g_data_router.science_line_overflow);
+    g_data_router.arm_packet_index = 0U;
+    g_data_router.arm_rx_state = ARM_SYNC_WAIT_A;
+    g_data_router.rover_dma_last_pos =
+        get_dma_rx_pos(&ROVER_IN_UART, sizeof(g_data_router.rover_dma_rx_buffer));
+    g_data_router.arm_dma_last_pos =
+        get_dma_rx_pos(&ARM_IN_UART, sizeof(g_data_router.arm_dma_rx_buffer));
 }
 
 static bool enqueue_uplink_frame(UplinkTxFrameType type, const uint8_t *data, uint16_t len)
@@ -198,14 +265,31 @@ static bool enqueue_uplink_frame(UplinkTxFrameType type, const uint8_t *data, ui
     return true;
 }
 
+static void advance_uplink_tx_head(void)
+{
+    if (g_data_router.uplink_tx_count == 0U) {
+        return;
+    }
+
+    g_data_router.uplink_tx_head =
+        (uint16_t)((g_data_router.uplink_tx_head + 1U) % UPLINK_TX_QUEUE_DEPTH);
+    g_data_router.uplink_tx_count--;
+}
+
 #if DEBUG_LOG_ENABLED
+static const char *get_text_frame_type_name(UplinkTxFrameType type)
+{
+    return (type == UPLINK_TX_FRAME_TYPE_SCIENCE) ? "science" : "rover";
+}
+
 static void log_tx_start(UplinkTxFrameType type,
                          const UART_HandleTypeDef *output_uart,
                          const uint8_t *data,
                          uint16_t len)
 {
-    if (type == UPLINK_TX_FRAME_TYPE_ROVER) {
-        char rover_line[ROVER_LINE_MAX_LEN];
+    if ((type == UPLINK_TX_FRAME_TYPE_ROVER) ||
+        (type == UPLINK_TX_FRAME_TYPE_SCIENCE)) {
+        char rover_line[TEXT_LINE_BUFFER_SIZE];
         uint16_t text_len = len;
 
         if ((text_len >= 2U) && (data[text_len - 2U] == '\r') &&
@@ -220,14 +304,17 @@ static void log_tx_start(UplinkTxFrameType type,
         memcpy(rover_line, data, text_len);
         rover_line[text_len] = '\0';
 
-        LOG("[uplink] tx rover -> %s: \"%s\"\r\n",
+        LOG("[uplink] tx %s -> %s: \"%s\"\r\n",
+            get_text_frame_type_name(type),
             get_uart_name(output_uart),
             rover_line);
         return;
     }
 
-    if ((type == UPLINK_TX_FRAME_TYPE_ARM) && (len == sizeof(PacketAC_v6))) {
-        LOG("[uplink] tx arm -> %s:", get_uart_name(output_uart));
+    if (type == UPLINK_TX_FRAME_TYPE_ARM) {
+        LOG("[uplink] tx arm -> %s (%u bytes):",
+            get_uart_name(output_uart),
+            (unsigned int)len);
         for (uint16_t i = 0U; i < len; i++) {
             LOG(" %02X", data[i]);
         }
@@ -245,9 +332,9 @@ static void pump_uplink_tx(void)
 {
     UART_HandleTypeDef *output_uart;
     uint16_t frame_len;
-#if DEBUG_LOG_ENABLED
     UplinkTxFrameType frame_type;
-#endif
+    AcPacketReducerResult reduce_result = AC_PACKET_REDUCER_RESULT_OK;
+    bool dropped_frame = false;
     uint32_t primask = enter_critical_section();
 
     if (g_data_router.uplink_tx_busy || (g_data_router.uplink_tx_count == 0U)) {
@@ -261,14 +348,39 @@ static void pump_uplink_tx(void)
         return;
     }
 
-    frame_len = g_data_router.uplink_tx_queue[g_data_router.uplink_tx_head].len;
-#if DEBUG_LOG_ENABLED
     frame_type =
         (UplinkTxFrameType)g_data_router.uplink_tx_queue[g_data_router.uplink_tx_head].type;
-#endif
-    memcpy(g_data_router.uplink_tx_dma_buffer,
-           g_data_router.uplink_tx_queue[g_data_router.uplink_tx_head].data,
-           frame_len);
+    frame_len = g_data_router.uplink_tx_queue[g_data_router.uplink_tx_head].len;
+
+    if ((frame_type == UPLINK_TX_FRAME_TYPE_ARM) && (output_uart == &huart6)) {
+        size_t reduced_len = 0U;
+
+        reduce_result = ac_packet_reducer_reduce_for_xbee(
+            g_data_router.uplink_tx_queue[g_data_router.uplink_tx_head].data,
+            frame_len,
+            g_data_router.uplink_tx_dma_buffer,
+            sizeof(g_data_router.uplink_tx_dma_buffer),
+            &reduced_len);
+
+        if (reduce_result == AC_PACKET_REDUCER_RESULT_OK) {
+            frame_len = (uint16_t)reduced_len;
+        } else {
+            advance_uplink_tx_head();
+            dropped_frame = true;
+        }
+    } else {
+        memcpy(g_data_router.uplink_tx_dma_buffer,
+               g_data_router.uplink_tx_queue[g_data_router.uplink_tx_head].data,
+               frame_len);
+    }
+
+    if (dropped_frame) {
+        exit_critical_section(primask);
+        LOG("[uplink] dropped arm packet before XBee tx: %s\r\n",
+            ac_packet_reducer_result_name(reduce_result));
+        return;
+    }
+
     g_data_router.uplink_tx_busy = true;
     g_data_router.tx_uart = output_uart;
     exit_critical_section(primask);
@@ -284,6 +396,70 @@ static void pump_uplink_tx(void)
         g_data_router.tx_uart = NULL;
         exit_critical_section(primask);
     }
+}
+
+static bool enqueue_downlink_byte(uint8_t byte)
+{
+    uint32_t primask = enter_critical_section();
+
+    if (g_data_router.downlink_tx_count >= DOWNLINK_TX_QUEUE_SIZE) {
+        exit_critical_section(primask);
+        return false;
+    }
+
+    g_data_router.downlink_tx_queue[g_data_router.downlink_tx_tail] = byte;
+    g_data_router.downlink_tx_tail =
+        (uint16_t)((g_data_router.downlink_tx_tail + 1U) %
+                   DOWNLINK_TX_QUEUE_SIZE);
+    g_data_router.downlink_tx_count++;
+    exit_critical_section(primask);
+    return true;
+}
+
+static void pump_downlink_tx(void)
+{
+    HAL_StatusTypeDef status;
+    uint32_t primask = enter_critical_section();
+
+    if (g_data_router.downlink_tx_busy ||
+        (g_data_router.downlink_tx_count == 0U)) {
+        exit_critical_section(primask);
+        return;
+    }
+
+    g_data_router.downlink_tx_byte =
+        g_data_router.downlink_tx_queue[g_data_router.downlink_tx_head];
+    g_data_router.downlink_tx_busy = true;
+    exit_critical_section(primask);
+
+    status = HAL_UART_Transmit_IT(&DOWNLINK_UART,
+                                  &g_data_router.downlink_tx_byte,
+                                  1U);
+    if (status != HAL_OK) {
+        primask = enter_critical_section();
+        g_data_router.downlink_tx_busy = false;
+        exit_critical_section(primask);
+    }
+}
+
+static bool is_hex_digit(char c)
+{
+    return ((c >= '0') && (c <= '9')) ||
+           ((c >= 'A') && (c <= 'F')) ||
+           ((c >= 'a') && (c <= 'f'));
+}
+
+static unsigned long hex_digit_to_value(char c)
+{
+    if ((c >= '0') && (c <= '9')) {
+        return (unsigned long)(c - '0');
+    }
+
+    if ((c >= 'A') && (c <= 'F')) {
+        return (unsigned long)(c - 'A' + 10);
+    }
+
+    return (unsigned long)(c - 'a' + 10);
 }
 
 static bool validate_rover_line(const char *line)
@@ -307,16 +483,11 @@ static bool validate_rover_line(const char *line)
     while ((*cursor != '\0') && (*cursor != ',')) {
         const char c = *cursor;
 
-        if ((c >= '0') && (c <= '9')) {
-            can_id = (can_id * 16UL) + (unsigned long)(c - '0');
-        } else if ((c >= 'A') && (c <= 'F')) {
-            can_id = (can_id * 16UL) + (unsigned long)(c - 'A' + 10);
-        } else if ((c >= 'a') && (c <= 'f')) {
-            can_id = (can_id * 16UL) + (unsigned long)(c - 'a' + 10);
-        } else {
+        if (!is_hex_digit(c)) {
             return false;
         }
 
+        can_id = (can_id * 16UL) + hex_digit_to_value(c);
         cursor++;
     }
 
@@ -325,22 +496,46 @@ static bool validate_rover_line(const char *line)
     }
 
     cursor++;
-    if ((*cursor == '-') || (*cursor == '+')) {
-        cursor++;
-    }
     if (*cursor == '\0') {
         return false;
     }
 
-    while (*cursor != '\0') {
-        if ((*cursor < '0') || (*cursor > '9')) {
-            return false;
-        }
+    return true;
+}
 
-        cursor++;
+static bool validate_science_mode_text_line(const char *line, char first_id_digit)
+{
+    const char *payload = &line[6];
+
+    if ((line[0] != '0') || ((line[1] != 'x') && (line[1] != 'X'))) {
+        return false;
+    }
+
+    if (line[2] != first_id_digit) {
+        return false;
+    }
+
+    if (!is_hex_digit(line[3]) || !is_hex_digit(line[4]) ||
+        (line[5] != ',')) {
+        return false;
+    }
+
+    if (*payload == '\0') {
+        return false;
     }
 
     return true;
+}
+
+static bool validate_science_mode_rover_line(const char *line)
+{
+    return validate_science_mode_text_line(line, '3') ||
+           validate_science_mode_text_line(line, '4');
+}
+
+static bool validate_science_line(const char *line)
+{
+    return validate_science_mode_text_line(line, '5');
 }
 
 static uint16_t crc16_ccitt_false(const uint8_t *data, size_t len)
@@ -377,52 +572,87 @@ static bool validate_arm_packet(const uint8_t *raw_packet)
     return crc_calc == packet.crc16;
 }
 
-static void consume_rover_byte(uint8_t byte)
+static void enqueue_text_frame(UplinkTxFrameType type, const char *line, uint16_t line_len)
 {
-    uint8_t tx_frame[ROVER_LINE_MAX_LEN + 2U];
+    uint8_t tx_frame[UPLINK_TX_FRAME_MAX_LEN];
 
+    memcpy(tx_frame, line, line_len);
+    tx_frame[line_len] = '\r';
+    tx_frame[line_len + 1U] = '\n';
+    if (!enqueue_uplink_frame(type, tx_frame, (uint16_t)(line_len + 2U))) {
+#if DEBUG_LOG_ENABLED
+        LOG("[uplink] %s tx queue full\r\n", get_text_frame_type_name(type));
+#endif
+    }
+}
+
+static void consume_text_line_byte(uint8_t byte,
+                                   char *line_buffer,
+                                   uint16_t *line_index,
+                                   bool *line_overflow,
+                                   bool (*validator)(const char *),
+                                   UplinkTxFrameType frame_type)
+{
     if (byte == '\r') {
         return;
     }
 
     if (byte == '\n') {
-        if (g_data_router.rover_line_overflow) {
-            g_data_router.rover_line_index = 0U;
-            g_data_router.rover_line_overflow = false;
+        if (*line_overflow) {
+            reset_text_line_receiver(line_index, line_overflow);
             return;
         }
 
-        if (g_data_router.rover_line_index == 0U) {
+        if (*line_index == 0U) {
             return;
         }
 
-        g_data_router.rover_line_buffer[g_data_router.rover_line_index] = '\0';
-        if (validate_rover_line(g_data_router.rover_line_buffer)) {
-            memcpy(tx_frame, g_data_router.rover_line_buffer,
-                   g_data_router.rover_line_index);
-            tx_frame[g_data_router.rover_line_index] = '\r';
-            tx_frame[g_data_router.rover_line_index + 1U] = '\n';
-            if (!enqueue_uplink_frame(UPLINK_TX_FRAME_TYPE_ROVER, tx_frame,
-                                      (uint16_t)(g_data_router.rover_line_index + 2U))) {
-                LOG("[uplink] rover tx queue full\r\n");
-            }
+        line_buffer[*line_index] = '\0';
+        if (validator(line_buffer)) {
+            enqueue_text_frame(frame_type, line_buffer, *line_index);
         }
 
-        g_data_router.rover_line_index = 0U;
+        *line_index = 0U;
         return;
     }
 
-    if (g_data_router.rover_line_overflow) {
+    if (*line_overflow) {
         return;
     }
 
-    if (g_data_router.rover_line_index >= (ROVER_LINE_MAX_LEN - 1U)) {
-        g_data_router.rover_line_index = 0U;
-        g_data_router.rover_line_overflow = true;
+    if (*line_index >= (TEXT_LINE_BUFFER_SIZE - 1U)) {
+        reset_text_line_receiver(line_index, line_overflow);
+        *line_overflow = true;
         return;
     }
 
-    g_data_router.rover_line_buffer[g_data_router.rover_line_index++] = (char)byte;
+    line_buffer[(*line_index)++] = (char)byte;
+}
+
+static void consume_rover_byte(uint8_t byte)
+{
+    consume_text_line_byte(byte, g_data_router.rover_line_buffer,
+                           &g_data_router.rover_line_index,
+                           &g_data_router.rover_line_overflow,
+                           validate_rover_line, UPLINK_TX_FRAME_TYPE_ROVER);
+}
+
+static void consume_science_mode_rover_byte(uint8_t byte)
+{
+    consume_text_line_byte(byte, g_data_router.rover_line_buffer,
+                           &g_data_router.rover_line_index,
+                           &g_data_router.rover_line_overflow,
+                           validate_science_mode_rover_line,
+                           UPLINK_TX_FRAME_TYPE_ROVER);
+}
+
+static void consume_science_byte(uint8_t byte)
+{
+    consume_text_line_byte(byte, g_data_router.science_line_buffer,
+                           &g_data_router.science_line_index,
+                           &g_data_router.science_line_overflow,
+                           validate_science_line,
+                           UPLINK_TX_FRAME_TYPE_SCIENCE);
 }
 
 static void consume_arm_byte(uint8_t byte)
@@ -473,18 +703,35 @@ static void consume_arm_byte(uint8_t byte)
     }
 }
 
+static void consume_bridge_byte(UART_HandleTypeDef *source_uart, uint8_t byte)
+{
+    note_rx_activity();
+
+    if (!enqueue_downlink_byte(byte)) {
+#if DEBUG_LOG_ENABLED
+        LOG("[uplink] downlink tx queue full; dropped byte from %s\r\n",
+            get_uart_name(source_uart));
+#else
+        (void)source_uart;
+#endif
+    }
+}
+
 static void poll_rover_dma_rx(void)
 {
     const uint16_t dma_pos =
-        (uint16_t)(sizeof(g_data_router.rover_dma_rx_buffer) -
-                   __HAL_DMA_GET_COUNTER(ROVER_IN_UART.hdmarx));
+        get_dma_rx_pos(&ROVER_IN_UART, sizeof(g_data_router.rover_dma_rx_buffer));
 
     while (g_data_router.rover_dma_last_pos != dma_pos) {
         const uint8_t byte =
             g_data_router.rover_dma_rx_buffer[g_data_router.rover_dma_last_pos];
 
         note_rx_activity();
-        consume_rover_byte(byte);
+        if (g_data_router.science_mode_enabled) {
+            consume_science_mode_rover_byte(byte);
+        } else {
+            consume_rover_byte(byte);
+        }
 
         g_data_router.rover_dma_last_pos++;
         if (g_data_router.rover_dma_last_pos >=
@@ -497,8 +744,7 @@ static void poll_rover_dma_rx(void)
 static void poll_arm_dma_rx(void)
 {
     const uint16_t dma_pos =
-        (uint16_t)(sizeof(g_data_router.arm_dma_rx_buffer) -
-                   __HAL_DMA_GET_COUNTER(ARM_IN_UART.hdmarx));
+        get_dma_rx_pos(&ARM_IN_UART, sizeof(g_data_router.arm_dma_rx_buffer));
 
     while (g_data_router.arm_dma_last_pos != dma_pos) {
         const uint8_t byte =
@@ -514,10 +760,66 @@ static void poll_arm_dma_rx(void)
     }
 }
 
+static void poll_science_dma_rx(void)
+{
+    const uint16_t dma_pos =
+        get_dma_rx_pos(&ARM_IN_UART, sizeof(g_data_router.arm_dma_rx_buffer));
+
+    while (g_data_router.arm_dma_last_pos != dma_pos) {
+        const uint8_t byte =
+            g_data_router.arm_dma_rx_buffer[g_data_router.arm_dma_last_pos];
+
+        note_rx_activity();
+        consume_science_byte(byte);
+
+        g_data_router.arm_dma_last_pos++;
+        if (g_data_router.arm_dma_last_pos >= sizeof(g_data_router.arm_dma_rx_buffer)) {
+            g_data_router.arm_dma_last_pos = 0U;
+        }
+    }
+}
+
+static void poll_bridge_dma_rx(UART_HandleTypeDef *huart,
+                               uint8_t *buffer,
+                               uint16_t buffer_size,
+                               uint16_t *last_pos)
+{
+    const uint16_t dma_pos = get_dma_rx_pos(huart, buffer_size);
+
+    while (*last_pos != dma_pos) {
+        consume_bridge_byte(huart, buffer[*last_pos]);
+
+        (*last_pos)++;
+        if (*last_pos >= buffer_size) {
+            *last_pos = 0U;
+        }
+    }
+}
+
+static void restart_bridge_reception(UART_HandleTypeDef *huart)
+{
+    if (huart == &USB_IO_UART) {
+        restart_circular_reception(&USB_IO_UART,
+                                   g_data_router.usb_bridge_dma_rx_buffer,
+                                   sizeof(g_data_router.usb_bridge_dma_rx_buffer),
+                                   &g_data_router.usb_bridge_dma_last_pos);
+        return;
+    }
+
+    if (huart == &XBEE_IO_UART) {
+        restart_circular_reception(&XBEE_IO_UART,
+                                   g_data_router.xbee_bridge_dma_rx_buffer,
+                                   sizeof(g_data_router.xbee_bridge_dma_rx_buffer),
+                                   &g_data_router.xbee_bridge_dma_last_pos);
+    }
+}
+
 void data_router_init(void)
 {
     memset(&g_data_router, 0, sizeof(g_data_router));
     g_data_router.arm_rx_state = ARM_SYNC_WAIT_A;
+    g_data_router.science_mode_enabled =
+        uplink_output_source_is_science_mode_enabled();
     sync_active_output_uart(true);
 
     if (start_circular_reception(&ROVER_IN_UART, g_data_router.rover_dma_rx_buffer,
@@ -529,14 +831,42 @@ void data_router_init(void)
                                  sizeof(g_data_router.arm_dma_rx_buffer)) != HAL_OK) {
         Error_Handler();
     }
+
+    if (start_circular_reception(&USB_IO_UART,
+                                 g_data_router.usb_bridge_dma_rx_buffer,
+                                 sizeof(g_data_router.usb_bridge_dma_rx_buffer)) != HAL_OK) {
+        Error_Handler();
+    }
+
+    if (start_circular_reception(&XBEE_IO_UART,
+                                 g_data_router.xbee_bridge_dma_rx_buffer,
+                                 sizeof(g_data_router.xbee_bridge_dma_rx_buffer)) != HAL_OK) {
+        Error_Handler();
+    }
+
+    LOG("[uplink] bridge USART3/USART6 RX -> UART4 TX\r\n");
 }
 
 void data_router_poll(void)
 {
     sync_active_output_uart(true);
+    sync_science_mode();
     poll_rover_dma_rx();
-    poll_arm_dma_rx();
+    if (g_data_router.science_mode_enabled) {
+        poll_science_dma_rx();
+    } else {
+        poll_arm_dma_rx();
+    }
+    poll_bridge_dma_rx(&USB_IO_UART,
+                       g_data_router.usb_bridge_dma_rx_buffer,
+                       sizeof(g_data_router.usb_bridge_dma_rx_buffer),
+                       &g_data_router.usb_bridge_dma_last_pos);
+    poll_bridge_dma_rx(&XBEE_IO_UART,
+                       g_data_router.xbee_bridge_dma_rx_buffer,
+                       sizeof(g_data_router.xbee_bridge_dma_rx_buffer),
+                       &g_data_router.xbee_bridge_dma_last_pos);
     pump_uplink_tx();
+    pump_downlink_tx();
 }
 
 void data_router_on_uart_rx_complete(UART_HandleTypeDef *huart)
@@ -548,19 +878,32 @@ void data_router_on_uart_tx_complete(UART_HandleTypeDef *huart)
 {
     uint32_t primask;
 
+    if (huart == &DOWNLINK_UART) {
+        primask = enter_critical_section();
+        if (g_data_router.downlink_tx_count > 0U) {
+            g_data_router.downlink_tx_head =
+                (uint16_t)((g_data_router.downlink_tx_head + 1U) %
+                           DOWNLINK_TX_QUEUE_SIZE);
+            g_data_router.downlink_tx_count--;
+        }
+        g_data_router.downlink_tx_busy = false;
+        exit_critical_section(primask);
+
+        pump_downlink_tx();
+        return;
+    }
+
     if (huart != g_data_router.tx_uart) {
         return;
     }
 
     primask = enter_critical_section();
-    if (g_data_router.uplink_tx_count > 0U) {
-        g_data_router.uplink_tx_head =
-            (uint16_t)((g_data_router.uplink_tx_head + 1U) % UPLINK_TX_QUEUE_DEPTH);
-        g_data_router.uplink_tx_count--;
-    }
+    advance_uplink_tx_head();
     g_data_router.uplink_tx_busy = false;
     g_data_router.tx_uart = NULL;
     exit_critical_section(primask);
+
+    pump_uplink_tx();
 }
 
 void data_router_on_uart_error(UART_HandleTypeDef *huart)
@@ -574,33 +917,54 @@ void data_router_on_uart_error(UART_HandleTypeDef *huart)
 #endif
 
     if (huart == &ROVER_IN_UART) {
-        g_data_router.rover_dma_last_pos = 0U;
-        g_data_router.rover_line_index = 0U;
-        g_data_router.rover_line_overflow = false;
+        reset_text_line_receiver(&g_data_router.rover_line_index,
+                                 &g_data_router.rover_line_overflow);
         restart_circular_reception(&ROVER_IN_UART, g_data_router.rover_dma_rx_buffer,
-                                   sizeof(g_data_router.rover_dma_rx_buffer));
+                                   sizeof(g_data_router.rover_dma_rx_buffer),
+                                   &g_data_router.rover_dma_last_pos);
         return;
     }
 
     if (huart == &ARM_IN_UART) {
-        g_data_router.arm_dma_last_pos = 0U;
+        reset_text_line_receiver(&g_data_router.science_line_index,
+                                 &g_data_router.science_line_overflow);
         g_data_router.arm_packet_index = 0U;
         g_data_router.arm_rx_state = ARM_SYNC_WAIT_A;
         restart_circular_reception(&ARM_IN_UART, g_data_router.arm_dma_rx_buffer,
-                                   sizeof(g_data_router.arm_dma_rx_buffer));
+                                   sizeof(g_data_router.arm_dma_rx_buffer),
+                                   &g_data_router.arm_dma_last_pos);
         return;
     }
 
-    if (!is_output_uart(huart)) {
+    if (is_output_uart(huart)) {
+        restart_bridge_reception(huart);
+
+        primask = enter_critical_section();
+        if (huart == g_data_router.tx_uart) {
+            g_data_router.uplink_tx_busy = false;
+            g_data_router.tx_uart = NULL;
+        }
+        exit_critical_section(primask);
+        pump_uplink_tx();
         return;
     }
 
-    (void)HAL_UART_DMAStop(huart);
+    if (huart != &DOWNLINK_UART) {
+        return;
+    }
+
+    (void)HAL_UART_AbortTransmit(&DOWNLINK_UART);
 
     primask = enter_critical_section();
-    if (huart == g_data_router.tx_uart) {
-        g_data_router.uplink_tx_busy = false;
-        g_data_router.tx_uart = NULL;
+    if (g_data_router.downlink_tx_busy &&
+        (g_data_router.downlink_tx_count > 0U)) {
+        g_data_router.downlink_tx_head =
+            (uint16_t)((g_data_router.downlink_tx_head + 1U) %
+                       DOWNLINK_TX_QUEUE_SIZE);
+        g_data_router.downlink_tx_count--;
     }
+    g_data_router.downlink_tx_busy = false;
     exit_critical_section(primask);
+
+    pump_downlink_tx();
 }

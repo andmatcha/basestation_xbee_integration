@@ -2,13 +2,14 @@
 
 ## downlink
 
-`downlink` は、選択中の入力 UART から受信したストリームを
+`downlink` は、`UART4` から受信したストリームを
 `USART1 (Rover OUT)` と `USART2 (Arm OUT)` に振り分ける。
 
-入力元は次の 2 系統で、`PC13` のタクトスイッチを 2 秒長押しすると切り替わる。
+入力元は uplink からの `UART4` link 固定で、downlink 側の `USART3` / `USART6`
+は使用しない。
 
-- `USART3`: USB IN
-- `USART6`: XBee IN
+XBee は transparent mode 前提で扱い、API frame の `0x7E` delimiter 解析や
+7-bit/mask 変換は行わない。
 
 出力先は次の 2 系統。
 
@@ -20,9 +21,9 @@
 - `downlink/src/app.c`
   - `main.c` から呼ばれる `init()` / `poll()` を提供するアプリ層
 - `downlink/src/modules/input_source_selector.c`
-  - `PC13` の長押しによる入力元切り替えを管理する
+  - `PC13` の短押し 2 回による science mode 切り替えを管理する
 - `downlink/src/modules/data_router.c`
-  - 選択中の入力ストリームを解釈し、rover 用と arm 用に振り分ける
+  - `UART4` の入力ストリームを解釈し、rover 用と arm 用に振り分ける
 - `downlink/src/modules/status_leds.c`
   - MODE LED / STATE LED の色と点滅状態を管理する
 - `downlink/src/modules/rgb_led_driver.c`
@@ -77,14 +78,12 @@
 
 ### MODE LED
 
-- 選択中の入力/出力ソースに応じて常時点灯し、点滅しない
-- USB 入力選択中: オレンジ `RGB(255, 96, 0)`
-- XBee 入力選択中: 水色 `RGB(0, 160, 255)`
+- `UART4` 入力固定の link 表示として水色 `RGB(0, 160, 255)` で常時点灯する
 
 ### STATE LED
 
 - 初期化完了後の待機状態: 緑 `RGB(0, 255, 0)` で点灯
-- 選択中入力で受信が続いている間: 高速点滅
+- `UART4` 入力で受信が続いている間: 高速点滅
 - 点滅の半周期: `60ms`
 - 受信が止まったと判断する保持時間: `250ms`
 
@@ -119,6 +118,9 @@ UART 受信処理と両立しやすい構成にしている。
 `uplink` は、`USART1 (Rover IN)` と `USART2 (Arm IN)` から受信したデータを
 選択中の出力 UART へまとめて送信する。
 
+また、`USART3` / `USART6` で受信した downlink 向けデータは、内容を解釈せず
+そのまま `UART4` へ転送する。
+
 出力先は次の 2 系統で、`PC13` のタクトスイッチを 2 秒長押しすると切り替わる。
 
 - `USART3`: USB OUT
@@ -137,6 +139,7 @@ UART 受信処理と両立しやすい構成にしている。
   - `PC13` の長押しによる出力先切り替えを管理する
 - `uplink/src/modules/data_router.c`
   - rover / arm の入力形式を解釈し、選択中の USB または XBee へ送る
+  - `USART3` / `USART6` RX を `UART4` TX へ raw bridge する
 - `uplink/src/modules/status_leds.c`
   - MODE LED / STATE LED の色と点滅状態を管理する
 - `uplink/src/modules/rgb_led_driver.c`

@@ -85,7 +85,6 @@ typedef struct
 #define BUZZER_DOTTED_NOTE_MS(note_ms)  ((uint16_t)(((uint32_t)(note_ms) * 3U) / 2U))
 #define BUZZER_TRIPLET_NOTE_MS(note_ms) ((uint16_t)(((uint32_t)(note_ms) * 2U) / 3U))
 
-/* Example: BUZZER_NOTE_WITH_REST(BUZZER_PITCH_E5, BUZZER_EIGHTH_NOTE_MS(180U), 20U) */
 #define BUZZER_NOTE(pitch, duration_ms) \
     ((buzzer_note_t){(uint16_t)(pitch), (uint16_t)(duration_ms), 0U})
 #define BUZZER_NOTE_WITH_REST(pitch, duration_ms, rest_ms) \

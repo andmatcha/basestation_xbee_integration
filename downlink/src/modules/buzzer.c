@@ -4,14 +4,14 @@
 
 #include <stdbool.h>
 
-#define BUZZER_TIMER                    htim13
-#define BUZZER_TIMER_CHANNEL            TIM_CHANNEL_1
-#define BUZZER_MIN_PERIOD_TICKS         2U
-#define BUZZER_MAX_PERIOD_TICKS         65536UL
-#define BUZZER_STARTUP_BPM              180U
-#define BUZZER_STARTUP_GAP_MS           20U
-#define BUZZER_MODE_SWITCH_BPM          220U
-#define BUZZER_MODE_SWITCH_GAP_MS       15U
+#define BUZZER_TIMER              htim13
+#define BUZZER_TIMER_CHANNEL      TIM_CHANNEL_1
+#define BUZZER_MIN_PERIOD_TICKS   2U
+#define BUZZER_MAX_PERIOD_TICKS   65536UL
+#define BUZZER_STARTUP_BPM        180U
+#define BUZZER_STARTUP_GAP_MS     20U
+#define BUZZER_MODE_SWITCH_BPM    220U
+#define BUZZER_MODE_SWITCH_GAP_MS 15U
 
 typedef struct
 {
@@ -115,9 +115,15 @@ void buzzer_play_startup_melody(void)
         BUZZER_NOTE_WITH_REST(BUZZER_PITCH_E5,
                               BUZZER_EIGHTH_NOTE_MS(BUZZER_STARTUP_BPM),
                               BUZZER_STARTUP_GAP_MS),
+<<<<<<< HEAD
         BUZZER_NOTE_WITH_REST(BUZZER_PITCH_G5,
                               BUZZER_EIGHTH_NOTE_MS(BUZZER_STARTUP_BPM),
                               BUZZER_STARTUP_GAP_MS)
+=======
+        BUZZER_NOTE(BUZZER_PITCH_G5,
+                    BUZZER_DOTTED_NOTE_MS(
+                        BUZZER_EIGHTH_NOTE_MS(BUZZER_STARTUP_BPM))),
+>>>>>>> main
     };
 
     buzzer_play_melody(startup_melody,
