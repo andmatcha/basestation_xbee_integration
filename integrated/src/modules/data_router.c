@@ -620,23 +620,7 @@ static bool validate_rover_text(const uint8_t *packet, uint16_t length)
     }
 
     idx++;
-    if ((idx < length) && ((packet[idx] == '-') || (packet[idx] == '+'))) {
-        idx++;
-    }
-
-    if (idx >= length) {
-        return false;
-    }
-
-    while (idx < length) {
-        if ((packet[idx] < '0') || (packet[idx] > '9')) {
-            return false;
-        }
-
-        idx++;
-    }
-
-    return true;
+    return idx < length;
 }
 
 static bool validate_science_mode_text_packet(const uint8_t *packet,
@@ -1143,7 +1127,7 @@ static void route_downlink_science_mode_text_packet(const uint8_t *packet, uint1
 
 static void route_downlink_arm_packet(const uint8_t *packet)
 {
-    if (!tx_channel_enqueue(&g_router.rover_out_tx, FRAME_TYPE_DOWNLINK_ARM,
+    if (!tx_channel_enqueue(&g_router.module_out_tx, FRAME_TYPE_DOWNLINK_ARM,
                             packet, ARM_PACKET_JF_SIZE)) {
         LOG("[integrated] arm downlink tx queue full\r\n");
         note_module_downlink_status(LINK_STAT_STATUS_QUEUE_FULL);
