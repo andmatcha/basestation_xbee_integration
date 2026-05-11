@@ -1,184 +1,375 @@
 # basestation_xbee_integration
 
-## downlink
+STM32F446RE を使った基地局 XBee 統合ファームウェアです。
 
-`downlink` は、`UART4` から受信したストリームを
-`USART1 (Rover OUT)` と `USART2 (Arm OUT)` に振り分ける。
+- `uplink/`, `downlink/`: v1 基板向け。1 枚の v1 基板上で uplink 側マイコンと downlink 側マイコンに分かれる。
+- `integrated/`: v2 基板向け。1 個のマイコンで uplink/downlink、LCD、2 系統 XBee をまとめて扱う。
 
-入力元は uplink からの `UART4` link 固定で、downlink 側の `USART3` / `USART6`
-は使用しない。
+XBee は transparent mode 前提です。API frame の `0x7E` delimiter 解析や
+7-bit/mask 変換は行わず、受信した UART ストリームをそのまま対象プロトコルとして解釈します。
 
-XBee は transparent mode 前提で扱い、API frame の `0x7E` delimiter 解析や
-7-bit/mask 変換は行わない。
+## 共通データ形式
 
-出力先は次の 2 系統。
+### Rover text
 
-- `USART1`: Rover OUT
-- `USART2`: Arm OUT
+Rover 系データは改行終端の ASCII テキストとして扱います。
 
-## モジュール構成
+- 通常モード: `0x3...` または `0x4...` で始まる `0xHEX,DECIMAL...`
+- science mode: `0x3xx,...` または `0x4xx,...`
+- `\r` は無視し、`\n` で 1 行を確定する
+- 受理した行は送信先へ本文 + `\r\n` として送る
+- 行が長すぎる場合はその行を破棄する
 
-- `downlink/src/app.c`
-  - `main.c` から呼ばれる `init()` / `poll()` を提供するアプリ層
-- `downlink/src/modules/input_source_selector.c`
-  - `PC13` の短押し 2 回による science mode 切り替えを管理する
-- `downlink/src/modules/data_router.c`
-  - `UART4` の入力ストリームを解釈し、rover 用と arm 用に振り分ける
-- `downlink/src/modules/status_leds.c`
-  - MODE LED / STATE LED の色と点滅状態を管理する
-- `downlink/src/modules/rgb_led_driver.c`
-  - `TIM3 CH3/CH4 (PB0/PB1)` を使って RGB LED 用の 1 線式波形を生成する
+通常モードでは CAN ID が `0x7FF` を超える行や、カンマを含まない行は破棄します。
 
-## 振り分け仕様
+### Science text
 
-受信ストリームは 1 バイトずつ解釈され、通常は rover 用テキストとして扱う。
-ただし、`J` の直後に `F` が来た場合は `JF` を arm パケットの先頭とみなし、
-そこから固定長 16 バイトを arm 用データとして扱う。
+Science 系データは science mode でだけ使います。
 
-### Rover データ形式
+- 形式: `0x5xx,...`
+- `\r` は無視し、`\n` で 1 行を確定する
+- 受理した行は送信先へ本文 + `\r\n` として送る
 
-- 形式: 改行終端のテキスト行
-- 終端: `\n`
-- 無視する文字: `\r`
-- 最大長: 64 バイト
-- 受理条件: `0x3...` または `0x4...` で始まる `0xHEX,DECIMAL` 形式の行のみを rover へ送る
-- 出力先: `USART1`
-- 送信時の整形: 受信した 1 行をそのまま送信し、末尾に `\r\n` を付ける
+### Arm uplink: AC v6
 
-補足:
+Arm への uplink command は `AC v6` を扱います。
 
-- `J` 単体は rover データとして扱われる
-- `JF` は rover 文字列ではなく arm パケット開始として解釈される
-- 64 バイトを超えるとその時点の rover バッファは破棄される
+- 形式: `AC` で始まる固定長バイナリ
+- サイズ: 39 bytes
+- CRC: CRC-16/CCITT-FALSE、Little Endian、先頭 37 bytes に対して計算
 
-### Arm データ形式
+XBee へ送る前に `AC v6` を縮小する経路では、`flags` の control mode
+に応じて `M` / `I` / `B` packet に変換し、CRC を再計算します。
 
-- 形式: `JF` で始まる固定長バイナリフレーム
-- サイズ: 16 バイト固定
-- 先頭 2 バイト: ASCII の `J` `F` (`0x4A 0x46`)
-- 残り 14 バイト: 生バイト列
-- 出力先: `USART2`
-- 送信時の整形: 16 バイトをそのまま送信する
+- `MANUAL`: `M` packet、19 bytes
+- `IK`: `I` packet、19 bytes
+- `KEYBOARD_AUTO`: `B` packet、15 bytes
 
-補足:
+縮小の詳細は [AC_PACKET_XBEE_REDUCTION_SPEC.md](./AC_PACKET_XBEE_REDUCTION_SPEC.md) を参照してください。
 
-- arm パケット 16 バイトを受信し終えると、解釈モードは rover に戻る
-- rover テキスト中に `JF` が現れた場合も arm パケット開始とみなされる
+### Arm downlink: JF
 
-## 参考実装との対応
+Arm からの downlink feedback は `JF` を扱います。
 
-`ref/main.c` のフィルタロジックを `downlink` 向けの UART 割り当てに合わせて
-モジュール化して移植している。
+- 形式: `JF` で始まる固定長バイナリ
+- サイズ: 16 bytes
+- CRC: CRC-16/CCITT-FALSE、Little Endian、先頭 14 bytes に対して計算
 
-## LED 表示仕様
+通常モードの XBee/downlink ストリームでは、`J` の直後に `F` が来た場合に
+`JF` packet 開始として扱います。そのため通常モードの Rover text 中に `JF` を含めるのは避けてください。
 
-`PB0` は MODE LED、`PB1` は STATE LED として扱う。
-どちらも `TIM3` の PWM 出力を使って 1 線式 RGB LED を駆動する。
-表示色は `rgb_led_driver.c` 側で一律 50% までに制限している。
+## v1 基板: `uplink/` と `downlink/`
 
-### MODE LED
+v1 は 1 枚の基板上に uplink 側マイコンと downlink 側マイコンが分かれている構成です。
 
-- `UART4` 入力固定の link 表示として水色 `RGB(0, 160, 255)` で常時点灯する
+- `uplink/`: Rover/Arm/Science から来た uplink を USB または XBee へ送る。
+- `downlink/`: uplink 側マイコンから来た downlink ストリームを Rover/Arm/Science へ振り分ける。
 
-### STATE LED
+### v1 ハードウェアと通信設定
 
-- 初期化完了後の待機状態: 緑 `RGB(0, 255, 0)` で点灯
-- `UART4` 入力で受信が続いている間: 高速点滅
-- 点滅の半周期: `60ms`
-- 受信が止まったと判断する保持時間: `250ms`
+| 項目 | 設定 |
+| --- | --- |
+| MCU | STM32F446RET6 x2、uplink 側 / downlink 側 |
+| PlatformIO clock | 180 MHz |
+| UART 設定 | 115200 bps, 8 data bits, no parity, 1 stop bit, no flow control |
+| ボタン | `PC13`、pull-up、押下時 `LOW` |
+| MODE LED | `PB0` / `TIM3_CH3` の WS2812 |
+| STATE LED | `PB1` / `TIM3_CH4` の WS2812 |
+| Buzzer | `TIM13_CH1` |
 
-受信頻度は「直近の受信バイト数/秒」を簡易指標として色へ反映している。
-色としきい値は `downlink/src/modules/status_leds.c` のマクロで後から変更できる。
+v1 には LCD はありません。状態は MODE LED、STATE LED、buzzer で確認します。
+
+### v1 uplink の UART 割り当て
+
+| UART | 役割 |
+| --- | --- |
+| `USART1` | Rover IN |
+| `USART2` | Arm IN または Science IN |
+| `USART3` | USB OUT / USB downlink RX |
+| `USART6` | XBee OUT / XBee downlink RX |
+| `UART4` | downlink 側マイコンへの OUT |
+
+### v1 downlink の UART 割り当て
+
+| UART | 役割 |
+| --- | --- |
+| `UART4` | uplink 側マイコンからの LINK IN |
+| `USART1` | Rover OUT |
+| `USART2` | Arm OUT または Science OUT |
+
+`downlink/` 側の `USART3` / `USART6` は現行ルーティングでは入力元として使いません。
+
+### v1 ボタン操作とモード切り替え
+
+`uplink/` と `downlink/` のどちらも `PC13` の 1 ボタン操作です。
+
+| 操作 | uplink 側マイコン | downlink 側マイコン |
+| --- | --- | --- |
+| 起動直後 | XBee OUT、science mode OFF | UART4 IN、science mode OFF |
+| 長押し 1 秒以上 | 出力先を `USART6 XBee OUT` と `USART3 USB OUT` で切り替え | なし |
+| 350 ms 以下の短押し 2 回 | science mode ON/OFF | science mode ON/OFF |
+| 短押し 2 回の間隔 | 400 ms 以内 | 400 ms 以内 |
+
+science mode は uplink 側マイコンと downlink 側マイコンで独立しているため、Science を使う場合は両方のマイコンで同じ mode にしてください。
+
+### v1 mode の説明
+
+#### Normal / Arm mode
+
+Rover text と Arm binary を扱う通常モードです。
+
+uplink:
+
+```text
+USART1 Rover IN  -- Rover text 0x3/0x4 --> selected OUT(USART3 or USART6)
+USART2 Arm IN    -- AC v6 39 bytes -----> selected OUT(USART3 or USART6)
+USART3 RX        -- raw downlink -------> UART4 TX
+USART6 RX        -- raw downlink -------> UART4 TX
+```
+
+- Rover text は妥当な `0x3...` / `0x4...` 行だけを通す。
+- Arm IN は `AC` に同期し、39 bytes 集めて CRC が正しい packet だけを通す。
+- 出力先が XBee (`USART6`) の場合、`AC v6` は `M/I/B` へ縮小してから送信する。
+- 出力先が USB (`USART3`) の場合、`AC v6` は 39 bytes のまま送信する。
+
+downlink:
+
+```text
+UART4 LINK IN -- Rover text 0x3/0x4 --> USART1 Rover OUT
+UART4 LINK IN -- JF 16 bytes ---------> USART2 Arm OUT
+```
+
+- Rover text は妥当な `0x3...` / `0x4...` 行だけを通す。
+- `JF` は 16 bytes 集め、CRC が正しい packet だけを `USART2` へ送る。
+
+#### Science mode
+
+Arm binary の代わりに Science text を扱うモードです。
+
+uplink:
+
+```text
+USART1 Rover IN    -- 0x3xx/0x4xx text --> selected OUT(USART3 or USART6)
+USART2 Science IN  -- 0x5xx text -------> selected OUT(USART3 or USART6)
+USART3/USART6 RX   -- raw downlink -----> UART4 TX
+```
+
+downlink:
+
+```text
+UART4 LINK IN -- 0x3xx/0x4xx text --> USART1 Rover OUT
+UART4 LINK IN -- 0x5xx text -------> USART2 Science OUT
+```
+
+science mode 中は `JF` binary の切り出しを行わず、改行終端の text line として分類します。
+
+### v1 LED 表示
+
+MODE LED は現在の通信 mode を示します。
+
+| 状態 | 表示 |
+| --- | --- |
+| uplink: USB OUT | オレンジ `RGB(255, 96, 0)` |
+| uplink: XBee OUT | 水色 `RGB(0, 160, 255)` |
+| downlink: UART4 IN | 水色 `RGB(0, 160, 255)` |
+| science mode ON | 基本色と紫 `RGB(160, 0, 255)` を 400 ms 周期で交互表示 |
+
+STATE LED は受信 activity を示します。
+
+| 状態 | 表示 |
+| --- | --- |
+| 待機 | 緑 `RGB(0, 255, 0)` |
+| 受信中 | 半周期 60 ms で点滅 |
+| 受信停止判定 | 最終受信から 250 ms |
+
+受信中の色は直近 500 ms の受信 bytes/sec をもとに変わります。
 
 - 低頻度: `50 B/s` 付近で水色 `RGB(0, 160, 255)`
 - 中頻度: `800 B/s` 付近で黄 `RGB(255, 220, 0)`
 - 高頻度: `3000 B/s` 以上で赤 `RGB(255, 32, 0)`
 
-この 3 点の間は線形補間でグラデーション表示する。
+RGB LED は 800 kHz の WS2812 波形で駆動し、最大輝度は 50% に制限しています。
 
-### RGB LED 信号形式
+## v2 基板: `integrated/`
 
-- タイマ周期: 約 `800kHz`
-- 1 フレーム: `Green`, `Red`, `Blue` の順で各 8bit、合計 24bit
-- `0` ビット: High 約 `25 ticks`、Low 残り
-- `1` ビット: High 約 `58 ticks`、Low 残り
-- Reset: Low `240` スロット以上、約 `300us`
+v2 は `integrated/` の 1 マイコン構成です。Rover、Arm/Science、外付け XBee、オンボード XBee、LCD を同時に扱います。
 
-`rgb_led_driver.c` では 24bit + reset 分の波形を先に展開し、`TIM3_UP` の DMA で
-`CCR3/CCR4` を更新している。800kHz ごとの CPU 割り込みではなく DMA 駆動にして、
-UART 受信処理と両立しやすい構成にしている。
+### v2 ハードウェアと通信設定
 
-補足:
+| 項目 | 設定 |
+| --- | --- |
+| MCU | STM32F446RET6 |
+| PlatformIO clock | 160 MHz |
+| UART 設定 | 115200 bps, 8 data bits, no parity, 1 stop bit, no flow control |
+| LCD | I2C 16x2、7-bit address `0x3E` |
+| I2C1 | `PB8` SCL、`PB9` SDA、100 kHz |
+| LCD reset | `PB7` |
+| Mode button | `PC13` / `PUSH_SWITCH_1`、pull-up、押下時 `LOW` |
+| Display button | `PC14` / `PUSH_SWITCH_2`、pull-up、押下時 `LOW` |
+| RSSI PWM input | `PA0` / `TIM2_CH1/CH2` |
+| Buzzer | `PA6` / `TIM13_CH1`、4 kHz beep |
 
-- `TIM3_UP` が `DMA1_Stream2` を使うため、未使用だった `UART4 RX DMA` は無効化している
-- `PB0/PB1` は LED 波形の立ち上がりを確保するため `GPIO_SPEED_FREQ_VERY_HIGH` にしている
+### v2 UART 割り当て
 
-## uplink
+| UART | 役割 |
+| --- | --- |
+| `USART1` | Rover IN |
+| `USART2` | Module IN。Arm mode では Arm IN、Science mode では Science IN |
+| `UART4` | Rover OUT |
+| `UART5` | Module OUT。Arm mode では Arm OUT、Science mode では Science OUT |
+| `USART3` | External XBee |
+| `USART6` | Onboard XBee |
 
-`uplink` は、`USART1 (Rover IN)` と `USART2 (Arm IN)` から受信したデータを
-選択中の出力 UART へまとめて送信する。
+### v2 ボタン操作とモード切り替え
 
-また、`USART3` / `USART6` で受信した downlink 向けデータは、内容を解釈せず
-そのまま `UART4` へ転送する。
+#### `PUSH_SWITCH_1` / `PC13`: 通信 mode
 
-出力先は次の 2 系統で、`PC13` のタクトスイッチを 2 秒長押しすると切り替わる。
+| 操作 | 動作 | 音 |
+| --- | --- | --- |
+| 起動直後 | `Arm` / `External` | 起動時に 3 beep |
+| 1 回押して離す | Module mode を `Arm` / `Science` で切り替え | 1 beep |
+| 350 ms 以内に 2 回押す | XBee mode を `External` / `Onboard` で切り替え | 2 beep |
 
-- `USART3`: USB OUT
-- `USART6`: XBee OUT
+1 回押しは、2 回押し判定のため release 後 350 ms 待ってから確定します。
 
-入力元は次の 2 系統。
+#### `PUSH_SWITCH_2` / `PC14`: LCD 表示
 
-- `USART1`: Rover IN
-- `USART2`: Arm IN
+押して離すたびに LCD を `Status view` と `Rate view` で切り替えます。
 
-### モジュール構成
+- 起動直後は `Status view`
+- debounce は 30 ms
+- 切り替え時に 1 beep
 
-- `uplink/src/app.c`
-  - `main.c` から呼ばれる `init()` / `poll()` を提供するアプリ層
-- `uplink/src/modules/output_source_selector.c`
-  - `PC13` の長押しによる出力先切り替えを管理する
-- `uplink/src/modules/data_router.c`
-  - rover / arm の入力形式を解釈し、選択中の USB または XBee へ送る
-  - `USART3` / `USART6` RX を `UART4` TX へ raw bridge する
-- `uplink/src/modules/status_leds.c`
-  - MODE LED / STATE LED の色と点滅状態を管理する
-- `uplink/src/modules/rgb_led_driver.c`
-  - `TIM3 CH3/CH4 (PB0/PB1)` を使って RGB LED 用の 1 線式波形を生成する
+### v2 mode の説明
 
-### Rover データ形式
+#### Module mode: Arm
 
-- 形式: 改行終端のテキスト行
-- 受信元: `USART1`
-- 終端: `\n`
-- 無視する文字: `\r`
-- 最大長: 64 バイト
-- 受理条件: `0x3...` または `0x4...` で始まる `0xHEX,DECIMAL` 形式の行のみを送出する
-- 出力時の整形: 選択中の `USART3` または `USART6` へ本文 + `\r\n` を送る
+Rover text と Arm binary を扱う通常モードです。
 
-補足:
+```text
+USART1 Rover IN  -- Rover text 0x3/0x4 --> active XBee(USART3 or USART6)
+USART2 Arm IN    -- AC v6 39 bytes -----> active XBee(USART3 or USART6), M/I/Bへ縮小
+USART2 Arm IN    -- JF 16 bytes --------> active XBee(USART3 or USART6), raw
+active XBee RX   -- Rover text 0x3/0x4 --> UART4 Rover OUT
+active XBee RX   -- JF 16 bytes --------> UART5 Arm OUT
+```
 
-- 64 バイトを超えた行は改行まで破棄する
-- 送出先の downlink でも `JF` は arm パケット開始として解釈されるため、
-  rover 文字列中の `JF` はそのままでは安全ではない
+- `AC v6` は CRC 確認後に XBee 送信用の `M/I/B` へ縮小する。
+- `JF` は 16 bytes と CRC を確認して raw のまま転送する。
+- Rover text は `0x3...` / `0x4...` で始まる妥当な行だけを通す。
 
-### Arm データ形式
+#### Module mode: Science
 
-- 形式: `JF` で始まる固定長バイナリフレーム
-- 受信元: `USART2`
-- サイズ: 16 バイト固定
-- 先頭 2 バイト: ASCII の `J` `F` (`0x4A 0x46`)
-- 残り 14 バイト: 生バイト列
-- 出力時の整形: 選択中の `USART3` または `USART6` へ 16 バイトをそのまま送る
+Arm binary の代わりに Science text を扱うモードです。
 
-補足:
+```text
+USART1 Rover IN    -- 0x3xx/0x4xx text --> active XBee(USART3 or USART6)
+USART2 Science IN  -- 0x5xx text -------> active XBee(USART3 or USART6)
+active XBee RX     -- 0x3xx/0x4xx text --> UART4 Rover OUT
+active XBee RX     -- 0x5xx text -------> UART5 Science OUT
+```
 
-- `USART2` 側では `JF` を見つけて 16 バイト単位へ再同期する
+Science mode では port 間違いを検出します。たとえば `0x5xx` が Rover IN に来た場合や、
+`0x3xx` / `0x4xx` が Science IN に来た場合は `WP` として扱い、転送しません。
 
-### LED 表示仕様
+#### XBee mode: External / Onboard
 
-LED の色、点滅周期、受信頻度グラデーション、`TIM3` + DMA による駆動方式は
-`downlink` と同一で、表示色の最大光量も `rgb_led_driver.c` 側で 50% に制限している。
+active XBee を選択する mode です。
 
-補足:
+- `External`: `USART3` を XBee として使う。起動直後の default。
+- `Onboard`: `USART6` を XBee として使う。debug build では RSSI PWM を 1 秒ごとに log 出力する。
 
-- `uplink` でも `TIM3_UP` が `DMA1_Stream2` を使うため、未使用の `UART4 RX DMA` は無効化している
+active ではない XBee UART から受信した bytes は読み捨て、downlink parser には入れません。
+
+### v2 LCD 表示
+
+LCD は 16 文字 x 2 行です。200 ms ごとに再描画します。
+
+#### Startup
+
+起動直後に約 1 秒表示します。
+
+```text
+KONNICHIWA
+
+```
+
+#### Status view
+
+起動後の default 表示です。
+
+```text
+Arm External
+UP:OK DOWN:--
+```
+
+1 行目は現在の `Module mode` と `XBee mode` です。
+
+- `Arm External`
+- `Arm Onboard`
+- `Science External`
+- `Science Onboard`
+
+2 行目は uplink/downlink の直近 status です。
+
+| 表示 | 意味 |
+| --- | --- |
+| `OK` | 正常に受理または送信 |
+| `FM` | format error |
+| `WP` | wrong port |
+| `SY` | sync error |
+| `CR` | CRC error |
+| `OF` | overflow |
+| `QF` | TX queue full |
+| `ER` | UART/HAL error |
+| `--` | 直近 250 ms に status なし |
+
+#### Rate view
+
+通信頻度を Hz 単位で表示します。
+
+```text
+RF:TX12Hz/RX4Hz
+R:5/4 A:10/9
+```
+
+- 1 行目: active XBee 側の TX/RX rate。`999` で上限表示。
+- 2 行目: `R:uplink_rx/downlink_rx` と `A:` または `S:` の `module_uplink_rx/module_downlink_rx`。
+- 2 行目の各 rate は `99` で上限表示。
+
+#### Error
+
+LCD 初期化、再描画、UART 送信開始などで fatal error と判断した場合に表示します。
+
+```text
+ERROR OCCURED
+
+```
+
+`OCCURED` は実装上の表示文字列そのままです。
+
+### v2 データフィルタリング概要
+
+- 各 UART RX は DMA circular buffer で受け、`poll()` で差分を処理する。
+- TX は queue に積み、DMA transmit 完了 callback で次の frame を送る。
+- mode 変更時は parser 状態を reset し、XBee mode 変更時は inactive 側の受信位置を flush する。
+- Rover/Science text は `\r` を捨て、`\n` で確定する。
+- Arm mode の XBee downlink は、Rover text と `JF` binary が混在する stream として処理する。
+- Science mode の XBee downlink は text line だけを扱い、`0x3xx` / `0x4xx` を Rover、`0x5xx` を Science へ振り分ける。
+- `AC v6` と `JF` は CRC が一致した packet だけを転送する。
+
+## ビルドと書き込み
+
+```sh
+make uplink
+make downlink
+make integrated
+```
+
+debug log 有効 build は次を使います。
+
+```sh
+make uplink-debug
+make downlink-debug
+make integrated-debug
+```
