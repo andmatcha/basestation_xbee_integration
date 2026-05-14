@@ -310,7 +310,7 @@ static const char *get_uart_name(const UART_HandleTypeDef *huart)
         return "USB2 module uplink";
     }
     if (huart == &ROVER_OUT_UART) {
-        return "USB3 rover downlink";
+        return "USB3 rover/arm downlink";
     }
     if (huart == &MODULE_OUT_UART) {
         return "USB4 module downlink";
@@ -1127,7 +1127,12 @@ static void route_downlink_science_mode_text_packet(const uint8_t *packet, uint1
 
 static void route_downlink_arm_packet(const uint8_t *packet)
 {
-    if (!tx_channel_enqueue(&g_router.module_out_tx, FRAME_TYPE_DOWNLINK_ARM,
+    tx_channel_t *tx_channel =
+        (mode_control_get_module_mode() == MODULE_MODE_ARM)
+            ? &g_router.rover_out_tx
+            : &g_router.module_out_tx;
+
+    if (!tx_channel_enqueue(tx_channel, FRAME_TYPE_DOWNLINK_ARM,
                             packet, ARM_PACKET_JF_SIZE)) {
         LOG("[integrated] arm downlink tx queue full\r\n");
         note_module_downlink_status(LINK_STAT_STATUS_QUEUE_FULL);

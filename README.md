@@ -215,8 +215,8 @@ v2 は `integrated/` の 1 マイコン構成です。Rover、Arm/Science、外�
 | --- | --- |
 | `USART1` | Rover IN |
 | `USART2` | Module IN。Arm mode では Arm IN、Science mode では Science IN |
-| `UART4` | Rover OUT |
-| `UART5` | Module OUT。Arm mode では Arm OUT、Science mode では Science OUT |
+| `UART4` | Rover OUT。Arm mode では Arm OUT も同じ UART4 に出力 |
+| `UART5` | Module OUT。Science mode では Science OUT。Arm mode の Arm downlink には使わない |
 | `USART3` | External XBee |
 | `USART6` | Onboard XBee |
 
@@ -251,12 +251,13 @@ USART1 Rover IN  -- Rover text 0x3/0x4 --> active XBee(USART3 or USART6)
 USART2 Arm IN    -- AC v6 39 bytes -----> active XBee(USART3 or USART6), M/I/Bへ縮小
 USART2 Arm IN    -- JF 16 bytes --------> active XBee(USART3 or USART6), raw
 active XBee RX   -- Rover text 0x3/0x4 --> UART4 Rover OUT
-active XBee RX   -- JF 16 bytes --------> UART5 Arm OUT
+active XBee RX   -- JF 16 bytes --------> UART4 Arm OUT
 ```
 
 - `AC v6` は CRC 確認後に XBee 送信用の `M/I/B` へ縮小する。
 - `JF` は 16 bytes と CRC を確認して raw のまま転送する。
 - Rover text は `0x3...` / `0x4...` で始まる妥当な行だけを通す。
+- Arm mode の downlink は Rover text と Arm `JF` をどちらも UART4 から出力する。
 
 #### Module mode: Science
 
