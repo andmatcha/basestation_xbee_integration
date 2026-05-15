@@ -58,6 +58,15 @@ Arm からの downlink feedback は `JF` を扱います。
 通常モードの XBee/downlink ストリームでは、`J` の直後に `F` が来た場合に
 `JF` packet 開始として扱います。そのため通常モードの Rover text 中に `JF` を含めるのは避けてください。
 
+### USB feedback text: UF v2
+
+USB memory 由来の text feedback は `UF v2` を扱います。
+
+- 形式: `UF` で始まる固定長バイナリ
+- サイズ: 40 bytes
+- CRC: CRC-16/CCITT-FALSE、Little Endian、先頭 38 bytes に対して計算
+- payload は最大 32 bytes。`payload_len` が 32 を超える packet は破棄する
+
 ## v1 基板: `uplink/` と `downlink/`
 
 v1 は 1 枚の基板上に uplink 側マイコンと downlink 側マイコンが分かれている構成です。
@@ -215,8 +224,8 @@ v2 は `integrated/` の 1 マイコン構成です。Rover、Arm/Science、外�
 | --- | --- |
 | `USART1` | Rover IN |
 | `USART2` | Module IN。Arm mode では Arm IN、Science mode では Science IN |
-| `UART4` | Rover OUT。Arm mode では Arm OUT も同じ UART4 に出力 |
-| `UART5` | Module OUT。Science mode では Science OUT。Arm mode の Arm downlink には使わない |
+| `UART4` | Rover OUT。Science mode の Rover downlink に使用 |
+| `UART5` | USB4 / Module OUT。Arm mode では Rover/Arm/UF downlink、Science mode では Science OUT |
 | `USART3` | External XBee |
 | `USART6` | Onboard XBee |
 
@@ -250,14 +259,15 @@ Rover text と Arm binary を扱う通常モードです。
 USART1 Rover IN  -- Rover text 0x3/0x4 --> active XBee(USART3 or USART6)
 USART2 Arm IN    -- AC v6 39 bytes -----> active XBee(USART3 or USART6), M/I/Bへ縮小
 USART2 Arm IN    -- JF 16 bytes --------> active XBee(USART3 or USART6), raw
-active XBee RX   -- Rover text 0x3/0x4 --> UART4 Rover OUT
-active XBee RX   -- JF 16 bytes --------> UART4 Arm OUT
+active XBee RX   -- Rover text 0x3/0x4 --> UART5 USB4 OUT
+active XBee RX   -- JF 16 bytes --------> UART5 USB4 OUT
+active XBee RX   -- UF v2 40 bytes -----> UART5 USB4 OUT
 ```
 
 - `AC v6` は CRC 確認後に XBee 送信用の `M/I/B` へ縮小する。
 - `JF` は 16 bytes と CRC を確認して raw のまま転送する。
 - Rover text は `0x3...` / `0x4...` で始まる妥当な行だけを通す。
-- Arm mode の downlink は Rover text と Arm `JF` をどちらも UART4 から出力する。
+- Arm mode の downlink は Rover text、Arm `JF`、`UF v2` を UART5 / USB4 から出力する。
 
 #### Module mode: Science
 
@@ -355,9 +365,9 @@ ERROR OCCURED
 - TX は queue に積み、DMA transmit 完了 callback で次の frame を送る。
 - mode 変更時は parser 状態を reset し、XBee mode 変更時は inactive 側の受信位置を flush する。
 - Rover/Science text は `\r` を捨て、`\n` で確定する。
-- Arm mode の XBee downlink は、Rover text と `JF` binary が混在する stream として処理する。
+- Arm mode の XBee downlink は、Rover text、`JF` binary、`UF v2` binary が混在する stream として処理する。
 - Science mode の XBee downlink は text line だけを扱い、`0x3xx` / `0x4xx` を Rover、`0x5xx` を Science へ振り分ける。
-- `AC v6` と `JF` は CRC が一致した packet だけを転送する。
+- `AC v6`、`JF`、`UF v2` は CRC が一致した packet だけを転送する。
 
 ## ビルドと書き込み
 
