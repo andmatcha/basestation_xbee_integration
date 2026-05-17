@@ -10,6 +10,7 @@
 #include <string.h>
 
 #define DISPLAY_SWITCH_DEBOUNCE_MS  30U
+#define DISPLAY_SWITCH_LONG_PRESS_MS  1000U
 #define DISPLAY_REFRESH_MS          200U
 #define DISPLAY_STARTUP_MS          1000U
 
@@ -19,8 +20,10 @@ typedef struct
     GPIO_PinState last_sampled_level;
     GPIO_PinState stable_level;
     uint32_t last_transition_ms;
+    uint32_t pressed_ms;
     uint32_t startup_until_ms;
     uint32_t last_refresh_ms;
+    bool long_press_handled;
     bool error;
     bool initialized;
 } display_manager_context_t;
@@ -85,13 +88,29 @@ static void toggle_display_mode(void)
     refresh_display(true);
 }
 
-static void handle_stable_transition(GPIO_PinState stable_level)
+static void toggle_downlink_raw_log(void)
+{
+    debug_log_set_downlink_raw_mode(!debug_log_is_downlink_raw_mode());
+    buzzer_play_double_beep();
+    refresh_display(true);
+}
+
+static void handle_stable_transition(GPIO_PinState stable_level, uint32_t now_ms)
 {
     g_display.stable_level = stable_level;
 
-    if (stable_level == GPIO_PIN_SET) {
+    if (stable_level == GPIO_PIN_RESET) {
+        g_display.pressed_ms = now_ms;
+        g_display.long_press_handled = false;
+        return;
+    }
+
+    if (!g_display.long_press_handled) {
         toggle_display_mode();
     }
+
+    g_display.pressed_ms = 0U;
+    g_display.long_press_handled = false;
 }
 
 void display_manager_init(I2C_HandleTypeDef *hi2c)
@@ -104,8 +123,10 @@ void display_manager_init(I2C_HandleTypeDef *hi2c)
     g_display.last_sampled_level = level;
     g_display.stable_level = level;
     g_display.last_transition_ms = now_ms;
+    g_display.pressed_ms = (level == GPIO_PIN_RESET) ? now_ms : 0U;
     g_display.startup_until_ms = now_ms + DISPLAY_STARTUP_MS;
     g_display.last_refresh_ms = 0U;
+    g_display.long_press_handled = false;
 
     if (lcd_driver_init(hi2c, LCD_RESET_GPIO_Port, LCD_RESET_Pin) != HAL_OK) {
         LOG("[integrated] lcd init failed\r\n");
@@ -140,7 +161,14 @@ void display_manager_poll(void)
 
     if ((g_display.stable_level != g_display.last_sampled_level) &&
         has_elapsed(g_display.last_transition_ms, DISPLAY_SWITCH_DEBOUNCE_MS)) {
-        handle_stable_transition(g_display.last_sampled_level);
+        handle_stable_transition(g_display.last_sampled_level, now_ms);
+    }
+
+    if ((g_display.stable_level == GPIO_PIN_RESET) &&
+        !g_display.long_press_handled &&
+        has_elapsed(g_display.pressed_ms, DISPLAY_SWITCH_LONG_PRESS_MS)) {
+        toggle_downlink_raw_log();
+        g_display.long_press_handled = true;
     }
 
     refresh_display(false);

@@ -1527,6 +1527,26 @@ static void process_xbee_input_byte(uint8_t byte)
     filter_xbee_payload_byte(byte);
 }
 
+static void log_xbee_raw_bytes(const uint8_t *buffer,
+                               uint16_t start_pos,
+                               uint16_t end_pos,
+                               uint16_t size)
+{
+    if (!debug_log_is_downlink_raw_mode() || (start_pos == end_pos)) {
+        return;
+    }
+
+    if (start_pos < end_pos) {
+        debug_log_downlink_raw_bytes(&buffer[start_pos],
+                                     (uint16_t)(end_pos - start_pos));
+        return;
+    }
+
+    debug_log_downlink_raw_bytes(&buffer[start_pos],
+                                 (uint16_t)(size - start_pos));
+    debug_log_downlink_raw_bytes(buffer, end_pos);
+}
+
 static void poll_xbee_dma(UART_HandleTypeDef *huart,
                           uint8_t *buffer,
                           uint16_t *position,
@@ -1534,6 +1554,10 @@ static void poll_xbee_dma(UART_HandleTypeDef *huart,
                           bool is_active)
 {
     const uint16_t dma_pos = get_dma_position(huart, size);
+
+    if (is_active) {
+        log_xbee_raw_bytes(buffer, *position, dma_pos, size);
+    }
 
     while (*position != dma_pos) {
         const uint8_t byte = buffer[*position];
