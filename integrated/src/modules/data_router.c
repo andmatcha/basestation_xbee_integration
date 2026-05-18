@@ -27,6 +27,8 @@
 #define ARM_PACKET_JF_SIZE        16U
 #define UF_PACKET_V2_SIZE         40U
 #define UF_PACKET_V2_CRC_OFFSET   38U
+#define UF_PACKET_V2_FLAGS_OFFSET 3U
+#define UF_PACKET_V2_FLAGS_VALID_MASK 0x1FU
 #define UF_PACKET_V2_PAYLOAD_LEN_OFFSET  5U
 #define UF_PACKET_V2_PAYLOAD_MAX_LEN     32U
 #define TX_QUEUE_DEPTH            24U
@@ -1199,6 +1201,8 @@ static bool validate_uf_v2_packet(const uint8_t *packet)
         ((uint16_t)packet[UF_PACKET_V2_CRC_OFFSET + 1U] << 8);
 
     return (packet[0] == 'U') && (packet[1] == 'F') &&
+           ((packet[UF_PACKET_V2_FLAGS_OFFSET] &
+             (uint8_t)~UF_PACKET_V2_FLAGS_VALID_MASK) == 0U) &&
            (packet[UF_PACKET_V2_PAYLOAD_LEN_OFFSET] <=
             UF_PACKET_V2_PAYLOAD_MAX_LEN) &&
            (crc_calc == crc_packet);
@@ -1435,6 +1439,14 @@ static void append_rejected_xbee_sync_byte(uint8_t byte, bool sync_only)
     }
 
     if (g_router.xbee_rover_len > 0U) {
+        if (mode_control_get_module_mode() == MODULE_MODE_SCIENCE) {
+            note_science_mode_downlink_status(g_router.xbee_rover_buf,
+                                              g_router.xbee_rover_len,
+                                              LINK_STAT_STATUS_OVERFLOW);
+            g_router.xbee_rover_len = 0U;
+            return;
+        }
+
         g_router.xbee_rover_len = 0U;
         note_rover_downlink_status(LINK_STAT_STATUS_OVERFLOW);
     }
@@ -1442,10 +1454,8 @@ static void append_rejected_xbee_sync_byte(uint8_t byte, bool sync_only)
 
 static void filter_xbee_payload_byte(uint8_t byte)
 {
-    if (mode_control_get_module_mode() == MODULE_MODE_SCIENCE) {
-        filter_xbee_science_payload_byte(byte);
-        return;
-    }
+    const bool is_arm_mode =
+        (mode_control_get_module_mode() == MODULE_MODE_ARM);
 
     if (g_router.xbee_filter_mode == XBEE_FILTER_ARM) {
         g_router.xbee_arm_buf[g_router.xbee_arm_len++] = byte;
@@ -1479,7 +1489,7 @@ static void filter_xbee_payload_byte(uint8_t byte)
         g_router.xbee_rover_pending_u = false;
         g_router.xbee_rover_pending_u_sync_only = false;
 
-        if (byte == 'F') {
+        if (is_arm_mode && (byte == 'F')) {
             start_xbee_uf_packet();
             return;
         }
@@ -1493,9 +1503,14 @@ static void filter_xbee_payload_byte(uint8_t byte)
         return;
     }
 
-    if (byte == 'U') {
+    if (is_arm_mode && (byte == 'U')) {
         g_router.xbee_rover_pending_u = true;
         g_router.xbee_rover_pending_u_sync_only = false;
+        return;
+    }
+
+    if (!is_arm_mode) {
+        filter_xbee_science_payload_byte(byte);
         return;
     }
 
