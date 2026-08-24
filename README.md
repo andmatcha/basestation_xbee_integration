@@ -39,11 +39,12 @@ Arm への uplink command は `AC v6` を扱います。
 - CRC: CRC-16/CCITT-FALSE、Little Endian、先頭 37 bytes に対して計算
 
 XBee へ送る前に `AC v6` を縮小する経路では、`flags` の control mode
-に応じて `M` / `I` / `B` packet に変換し、CRC を再計算します。
+に応じて `PacketMv2` / `PacketIv2` / `PacketBv2` に変換し、CRC を再計算します。
+各v2パケットはAC v6の `flags` をbyte `2`に全bitそのまま保持し、bit `0`でEnable / Disableを伝えます。
 
-- `MANUAL`: `M` packet、19 bytes
-- `IK`: `I` packet、19 bytes
-- `KEYBOARD_AUTO`: `B` packet、15 bytes
+- `MANUAL`: `PacketMv2`（header `M`）、20 bytes
+- `IK`: `PacketIv2`（header `I`）、20 bytes
+- `KEYBOARD_AUTO`: `PacketBv2`（header `B`）、16 bytes
 
 縮小の詳細は [AC_PACKET_XBEE_REDUCTION_SPEC.md](./AC_PACKET_XBEE_REDUCTION_SPEC.md) を参照してください。
 
@@ -138,7 +139,7 @@ USART6 RX        -- raw downlink -------> UART4 TX
 
 - Rover text は妥当な `0x3...` / `0x4...` 行だけを通す。
 - Arm IN は `AC` に同期し、39 bytes 集めて CRC が正しい packet だけを通す。
-- 出力先が XBee (`USART6`) の場合、`AC v6` は `M/I/B` へ縮小してから送信する。
+- 出力先が XBee (`USART6`) の場合、`AC v6` は `PacketMv2` / `PacketIv2` / `PacketBv2` へ縮小してから送信する。
 - 出力先が USB (`USART3`) の場合、`AC v6` は 39 bytes のまま送信する。
 
 downlink:
@@ -257,14 +258,14 @@ Rover text と Arm binary を扱う通常モードです。
 
 ```text
 USART1 Rover IN  -- Rover text 0x3/0x4 --> active XBee(USART3 or USART6)
-USART2 Arm IN    -- AC v6 39 bytes -----> active XBee(USART3 or USART6), M/I/Bへ縮小
+USART2 Arm IN    -- AC v6 39 bytes -----> active XBee(USART3 or USART6), M/I/B v2へ縮小
 USART2 Arm IN    -- JF 16 bytes --------> active XBee(USART3 or USART6), raw
 active XBee RX   -- Rover text 0x3/0x4 --> UART5 USB4 OUT
 active XBee RX   -- JF 16 bytes --------> UART5 USB4 OUT
 active XBee RX   -- UF v2 40 bytes -----> UART5 USB4 OUT
 ```
 
-- `AC v6` は CRC 確認後に XBee 送信用の `M/I/B` へ縮小する。
+- `AC v6` は CRC 確認後に XBee 送信用の `PacketMv2` / `PacketIv2` / `PacketBv2` へ縮小する。
 - `JF` は 16 bytes と CRC を確認して raw のまま転送する。
 - Rover text は `0x3...` / `0x4...` で始まる妥当な行だけを通す。
 - Arm mode の downlink は Rover text、Arm `JF`、`UF v2` を UART5 / USB4 から出力する。
@@ -383,4 +384,10 @@ debug log 有効 build は次を使います。
 make uplink-debug
 make downlink-debug
 make integrated-debug
+```
+
+AC v6からM/I/B v2への縮小変換は、ホスト上で次のテストを実行できます。
+
+```sh
+tests/run_ac_packet_reducer_tests.sh
 ```
