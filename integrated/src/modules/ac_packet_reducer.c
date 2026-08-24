@@ -3,7 +3,7 @@
 #include <stdbool.h>
 
 #define AC_PACKET_HEADER_LEN                 2U
-#define AC_PACKET_CONTROL_MODE_BYTE_INDEX    3U
+#define AC_PACKET_FLAGS_BYTE_INDEX           3U
 #define AC_PACKET_CONTROL_MODE_SHIFT         4U
 #define AC_PACKET_CONTROL_MODE_MASK          0x03U
 
@@ -31,20 +31,18 @@ typedef struct
 } ac_packet_reduction_profile_t;
 
 static const ac_packet_byte_range_t m_packet_delete_ranges[] = {
-    {3U, 3U},
     {18U, 29U},
     {31U, 36U},
 };
 
 static const ac_packet_byte_range_t i_packet_delete_ranges[] = {
-    {3U, 3U},
     {8U, 13U},
     {24U, 29U},
     {31U, 36U},
 };
 
 static const ac_packet_byte_range_t b_packet_delete_ranges[] = {
-    {3U, 17U},
+    {4U, 17U},
     {24U, 29U},
     {35U, 36U},
 };
@@ -119,7 +117,7 @@ static const ac_packet_reduction_profile_t *find_profile(uint8_t control_mode)
 
 static uint8_t extract_control_mode(const uint8_t *ac_packet)
 {
-    return (uint8_t)((ac_packet[AC_PACKET_CONTROL_MODE_BYTE_INDEX] >>
+    return (uint8_t)((ac_packet[AC_PACKET_FLAGS_BYTE_INDEX] >>
                       AC_PACKET_CONTROL_MODE_SHIFT) &
                      AC_PACKET_CONTROL_MODE_MASK);
 }
