@@ -259,6 +259,7 @@ Rover text と Arm binary を扱う通常モードです。
 ```text
 USART1 Rover IN  -- Rover text 0x3/0x4 --> active XBee(USART3 or USART6)
 USART2 Arm IN    -- AC v6 39 bytes -----> active XBee(USART3 or USART6), M/I/B v2へ縮小
+USART2 Arm IN    -- AM/AA 4 bytes ------> active XBee(USART3 or USART6), raw
 USART2 Arm IN    -- JF 16 bytes --------> active XBee(USART3 or USART6), raw
 active XBee RX   -- Rover text 0x3/0x4 --> UART5 USB4 OUT
 active XBee RX   -- JF 16 bytes --------> UART5 USB4 OUT
@@ -266,6 +267,7 @@ active XBee RX   -- UF v2 40 bytes -----> UART5 USB4 OUT
 ```
 
 - `AC v6` は CRC 確認後に XBee 送信用の `PacketMv2` / `PacketIv2` / `PacketBv2` へ縮小する。
+- `AM` / `AA` は 4 bytes と header に対する CRC を確認し、raw のまま転送する。
 - `JF` は 16 bytes と CRC を確認して raw のまま転送する。
 - Rover text は `0x3...` / `0x4...` で始まる妥当な行だけを通す。
 - Arm mode の downlink は Rover text、Arm `JF`、`UF v2` を UART5 / USB4 から出力する。
@@ -368,7 +370,7 @@ ERROR OCCURED
 - Rover/Science text は `\r` を捨て、`\n` で確定する。
 - Arm mode の XBee downlink は、Rover text、`JF` binary、`UF v2` binary が混在する stream として処理する。
 - Science mode の XBee downlink は text line だけを扱い、`0x3xx` / `0x4xx` を Rover、`0x5xx` を Science へ振り分ける。
-- `AC v6`、`JF`、`UF v2` は CRC が一致した packet だけを転送する。
+- `AC v6`、`AM`、`AA`、`JF`、`UF v2` は CRC が一致した packet だけを転送する。
 
 ## ビルドと書き込み
 

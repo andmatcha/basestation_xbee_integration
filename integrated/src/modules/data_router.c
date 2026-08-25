@@ -24,6 +24,7 @@
 #define ROVER_LINE_MAX_LEN        TEXT_LINE_BUFFER_SIZE
 #define ROVER_PACKET_MAX_LEN      TEXT_PACKET_MAX_LEN
 #define SCIENCE_PACKET_MAX_LEN    TEXT_PACKET_MAX_LEN
+#define ARM_PACKET_SHORT_SIZE     4U
 #define ARM_PACKET_JF_SIZE        16U
 #define UF_PACKET_V2_SIZE         40U
 #define UF_PACKET_V2_CRC_OFFSET   38U
@@ -56,6 +57,8 @@ typedef enum
 {
     FRAME_TYPE_UPLINK_ROVER = 0,
     FRAME_TYPE_UPLINK_ARM_AC,
+    FRAME_TYPE_UPLINK_ARM_AM,
+    FRAME_TYPE_UPLINK_ARM_AA,
     FRAME_TYPE_UPLINK_ARM_JF,
     FRAME_TYPE_UPLINK_SCIENCE_TEXT,
     FRAME_TYPE_DOWNLINK_ROVER,
@@ -67,9 +70,11 @@ typedef enum
 typedef enum
 {
     ARM_SYNC_WAIT = 0,
-    ARM_SYNC_WAIT_AC_C,
+    ARM_SYNC_WAIT_A_TYPE,
     ARM_SYNC_WAIT_JF_F,
     ARM_SYNC_COLLECT_AC,
+    ARM_SYNC_COLLECT_AM,
+    ARM_SYNC_COLLECT_AA,
     ARM_SYNC_COLLECT_JF,
 } arm_rx_state_t;
 
@@ -203,6 +208,8 @@ static void note_uplink_frame_status(frame_type_t type, link_stat_status_t statu
         note_rover_uplink_status(status);
         break;
     case FRAME_TYPE_UPLINK_ARM_AC:
+    case FRAME_TYPE_UPLINK_ARM_AM:
+    case FRAME_TYPE_UPLINK_ARM_AA:
     case FRAME_TYPE_UPLINK_ARM_JF:
     case FRAME_TYPE_UPLINK_SCIENCE_TEXT:
         note_module_uplink_status(status);
@@ -220,6 +227,8 @@ static void note_uplink_frame_rx(frame_type_t type)
         link_stats_note_rx(LINK_STAT_ROVER_UPLINK);
         break;
     case FRAME_TYPE_UPLINK_ARM_AC:
+    case FRAME_TYPE_UPLINK_ARM_AM:
+    case FRAME_TYPE_UPLINK_ARM_AA:
     case FRAME_TYPE_UPLINK_ARM_JF:
     case FRAME_TYPE_UPLINK_SCIENCE_TEXT:
         link_stats_note_rx(LINK_STAT_MODULE_UPLINK);
@@ -236,6 +245,8 @@ static void note_uplink_frame_tx(frame_type_t type)
         link_stats_note_tx(LINK_STAT_ROVER_UPLINK);
         break;
     case FRAME_TYPE_UPLINK_ARM_AC:
+    case FRAME_TYPE_UPLINK_ARM_AM:
+    case FRAME_TYPE_UPLINK_ARM_AA:
     case FRAME_TYPE_UPLINK_ARM_JF:
     case FRAME_TYPE_UPLINK_SCIENCE_TEXT:
         link_stats_note_tx(LINK_STAT_MODULE_UPLINK);
@@ -300,6 +311,8 @@ static void note_tx_error_status(frame_type_t type)
     switch (type) {
     case FRAME_TYPE_UPLINK_ROVER:
     case FRAME_TYPE_UPLINK_ARM_AC:
+    case FRAME_TYPE_UPLINK_ARM_AM:
+    case FRAME_TYPE_UPLINK_ARM_AA:
     case FRAME_TYPE_UPLINK_ARM_JF:
     case FRAME_TYPE_UPLINK_SCIENCE_TEXT:
         note_uplink_frame_status(type, LINK_STAT_STATUS_ERROR);
@@ -430,6 +443,8 @@ static void note_tx_start(frame_type_t type, const UART_HandleTypeDef *huart,
             get_uart_name(huart), (unsigned int)len);
         break;
     case FRAME_TYPE_UPLINK_ARM_AC:
+    case FRAME_TYPE_UPLINK_ARM_AM:
+    case FRAME_TYPE_UPLINK_ARM_AA:
     case FRAME_TYPE_UPLINK_ARM_JF:
     case FRAME_TYPE_UPLINK_SCIENCE_TEXT:
         link_stats_note_tx(LINK_STAT_RF);
@@ -728,6 +743,17 @@ static bool validate_ac_packet(const uint8_t *raw_packet)
     return crc_calc == packet.crc16;
 }
 
+static bool validate_short_arm_packet(const uint8_t *packet,
+                                      uint8_t expected_type)
+{
+    const uint16_t crc_calc = crc16_ccitt_false(packet, 2U);
+    const uint16_t crc_packet =
+        (uint16_t)packet[2] | ((uint16_t)packet[3] << 8);
+
+    return (packet[0] == 'A') && (packet[1] == expected_type) &&
+           (crc_calc == crc_packet);
+}
+
 static void enqueue_uplink_frame(frame_type_t type, const uint8_t *data,
                                  uint16_t len)
 {
@@ -927,7 +953,7 @@ static void consume_module_uplink_byte(uint8_t byte)
         if (byte == 'A') {
             g_router.arm_packet[0] = byte;
             g_router.arm_packet_len = 1U;
-            g_router.arm_rx_state = ARM_SYNC_WAIT_AC_C;
+            g_router.arm_rx_state = ARM_SYNC_WAIT_A_TYPE;
         } else if (byte == 'J') {
             g_router.arm_packet[0] = byte;
             g_router.arm_packet_len = 1U;
@@ -941,13 +967,16 @@ static void consume_module_uplink_byte(uint8_t byte)
         }
         break;
 
-    case ARM_SYNC_WAIT_AC_C:
+    case ARM_SYNC_WAIT_A_TYPE:
         if (byte == 'C') {
             g_router.arm_packet[g_router.arm_packet_len++] = byte;
             g_router.arm_rx_state = ARM_SYNC_COLLECT_AC;
+        } else if (byte == 'M') {
+            g_router.arm_packet[g_router.arm_packet_len++] = byte;
+            g_router.arm_rx_state = ARM_SYNC_COLLECT_AM;
         } else if (byte == 'A') {
-            g_router.arm_packet[0] = byte;
-            g_router.arm_packet_len = 1U;
+            g_router.arm_packet[g_router.arm_packet_len++] = byte;
+            g_router.arm_rx_state = ARM_SYNC_COLLECT_AA;
         } else if (byte == 'J') {
             g_router.arm_packet[0] = byte;
             g_router.arm_packet_len = 1U;
@@ -968,7 +997,7 @@ static void consume_module_uplink_byte(uint8_t byte)
         } else if (byte == 'A') {
             g_router.arm_packet[0] = byte;
             g_router.arm_packet_len = 1U;
-            g_router.arm_rx_state = ARM_SYNC_WAIT_AC_C;
+            g_router.arm_rx_state = ARM_SYNC_WAIT_A_TYPE;
         } else {
             note_module_uplink_status(LINK_STAT_STATUS_SYNC);
             reset_module_uplink_parser();
@@ -990,6 +1019,28 @@ static void consume_module_uplink_byte(uint8_t byte)
             reset_module_uplink_parser();
         }
         break;
+
+    case ARM_SYNC_COLLECT_AM:
+    case ARM_SYNC_COLLECT_AA: {
+        const bool is_am = g_router.arm_rx_state == ARM_SYNC_COLLECT_AM;
+        const uint8_t packet_type = is_am ? 'M' : 'A';
+        const frame_type_t frame_type =
+            is_am ? FRAME_TYPE_UPLINK_ARM_AM : FRAME_TYPE_UPLINK_ARM_AA;
+
+        g_router.arm_packet[g_router.arm_packet_len++] = byte;
+        if (g_router.arm_packet_len >= ARM_PACKET_SHORT_SIZE) {
+            if (validate_short_arm_packet(g_router.arm_packet, packet_type)) {
+                enqueue_arm_uplink_packet(frame_type, g_router.arm_packet,
+                                          ARM_PACKET_SHORT_SIZE);
+            } else {
+                LOG("[integrated] %s A%c packet rejected by crc\r\n",
+                    mode_control_get_module_name(), packet_type);
+                note_module_uplink_status(LINK_STAT_STATUS_CRC);
+            }
+            reset_module_uplink_parser();
+        }
+        break;
+    }
 
     case ARM_SYNC_COLLECT_JF:
         g_router.arm_packet[g_router.arm_packet_len++] = byte;
