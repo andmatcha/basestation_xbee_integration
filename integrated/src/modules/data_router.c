@@ -13,8 +13,10 @@
 
 #define ROVER_IN_UART             huart1
 #define MODULE_IN_UART            huart2
-#define ROVER_OUT_UART            huart4
-#define MODULE_OUT_UART           huart5
+#define SCIENCE_UART              huart4
+/* ERC wiring: ROVER_OUT and MODULE_OUT share the physical UART5 link. */
+#define ROVER_OUT_UART            huart5
+#define MODULE_OUT_UART           ROVER_OUT_UART
 #define EXTERNAL_XBEE_UART        huart3
 #define ONBOARD_XBEE_UART         huart6
 
@@ -23,7 +25,6 @@
 #define TEXT_PACKET_MAX_LEN       128U
 #define ROVER_LINE_MAX_LEN        TEXT_LINE_BUFFER_SIZE
 #define ROVER_PACKET_MAX_LEN      TEXT_PACKET_MAX_LEN
-#define SCIENCE_PACKET_MAX_LEN    TEXT_PACKET_MAX_LEN
 #define ARM_PACKET_SHORT_SIZE     4U
 #define ARM_PACKET_JF_SIZE        16U
 #define UF_PACKET_V2_SIZE         40U
@@ -129,6 +130,9 @@ typedef struct
     uint8_t arm_packet[sizeof(PacketAC_v6)];
     uint16_t arm_packet_len;
     arm_rx_state_t arm_rx_state;
+
+    uint8_t science_rx_dma[RX_DMA_BUFFER_SIZE];
+    uint16_t science_rx_pos;
     char science_line[TEXT_LINE_BUFFER_SIZE];
     uint16_t science_line_len;
     bool science_line_overflow;
@@ -152,8 +156,8 @@ typedef struct
     uint16_t xbee_uf_len;
 
     tx_channel_t xbee_tx;
-    tx_channel_t rover_out_tx;
-    tx_channel_t module_out_tx;
+    tx_channel_t rover_module_out_tx;
+    tx_channel_t science_out_tx;
 } data_router_context_t;
 
 static data_router_context_t g_router;
@@ -337,11 +341,11 @@ static const char *get_uart_name(const UART_HandleTypeDef *huart)
     if (huart == &MODULE_IN_UART) {
         return "USB2 module uplink";
     }
-    if (huart == &ROVER_OUT_UART) {
-        return "USB3 rover/arm downlink";
+    if (huart == &SCIENCE_UART) {
+        return "UART4 science uplink/downlink";
     }
-    if (huart == &MODULE_OUT_UART) {
-        return "USB4 module/arm downlink";
+    if (huart == &ROVER_OUT_UART) {
+        return "UART5 rover/module downlink";
     }
     if (huart == &EXTERNAL_XBEE_UART) {
         return "USART3 external xbee";
@@ -446,13 +450,19 @@ static void note_tx_start(frame_type_t type, const UART_HandleTypeDef *huart,
     case FRAME_TYPE_UPLINK_ARM_AM:
     case FRAME_TYPE_UPLINK_ARM_AA:
     case FRAME_TYPE_UPLINK_ARM_JF:
+        link_stats_note_tx(LINK_STAT_RF);
+        link_stats_note_tx(LINK_STAT_UPLINK);
+        note_uplink_frame_tx(type);
+        note_uplink_frame_status(type, LINK_STAT_STATUS_OK);
+        LOG("[integrated] uplink arm tx -> %s len=%u\r\n",
+            get_uart_name(huart), (unsigned int)len);
+        break;
     case FRAME_TYPE_UPLINK_SCIENCE_TEXT:
         link_stats_note_tx(LINK_STAT_RF);
         link_stats_note_tx(LINK_STAT_UPLINK);
         note_uplink_frame_tx(type);
         note_uplink_frame_status(type, LINK_STAT_STATUS_OK);
-        LOG("[integrated] uplink %s tx -> %s len=%u\r\n",
-            mode_control_get_module_name(),
+        LOG("[integrated] uplink science text tx -> %s len=%u\r\n",
             get_uart_name(huart), (unsigned int)len);
         break;
     case FRAME_TYPE_DOWNLINK_ROVER:
@@ -466,8 +476,7 @@ static void note_tx_start(frame_type_t type, const UART_HandleTypeDef *huart,
         link_stats_note_tx(LINK_STAT_DOWNLINK);
         note_downlink_frame_tx(type);
         note_downlink_frame_status(type, LINK_STAT_STATUS_OK);
-        LOG("[integrated] downlink %s tx -> %s len=%u\r\n",
-            mode_control_get_module_name(),
+        LOG("[integrated] downlink arm tx -> %s len=%u\r\n",
             get_uart_name(huart), (unsigned int)len);
         break;
     case FRAME_TYPE_DOWNLINK_UF:
@@ -609,6 +618,11 @@ static bool is_hex_digit(uint8_t byte)
            ((byte >= 'a') && (byte <= 'f'));
 }
 
+static bool is_decimal_digit(uint8_t byte)
+{
+    return (byte >= '0') && (byte <= '9');
+}
+
 static unsigned long hex_digit_to_value(uint8_t byte)
 {
     if ((byte >= '0') && (byte <= '9')) {
@@ -660,10 +674,10 @@ static bool validate_rover_text(const uint8_t *packet, uint16_t length)
     return idx < length;
 }
 
-static bool validate_science_mode_text_packet(const uint8_t *packet,
-                                              uint16_t length,
-                                              uint8_t first_id_digit)
+static bool validate_science_text(const uint8_t *packet, uint16_t length)
 {
+    uint16_t idx = 6U;
+
     if (length < 7U) {
         return false;
     }
@@ -672,7 +686,7 @@ static bool validate_science_mode_text_packet(const uint8_t *packet,
         return false;
     }
 
-    if (packet[2] != first_id_digit) {
+    if (packet[2] != '5') {
         return false;
     }
 
@@ -681,28 +695,32 @@ static bool validate_science_mode_text_packet(const uint8_t *packet,
         return false;
     }
 
+    if ((packet[idx] == '+') || (packet[idx] == '-')) {
+        idx++;
+    }
+
+    if (idx >= length) {
+        return false;
+    }
+
+    while (idx < length) {
+        if (!is_decimal_digit(packet[idx])) {
+            return false;
+        }
+        idx++;
+    }
+
     return true;
 }
 
-static bool validate_science_mode_rover_text(const uint8_t *packet, uint16_t length)
-{
-    return validate_science_mode_text_packet(packet, length, '3') ||
-           validate_science_mode_text_packet(packet, length, '4');
-}
-
-static bool validate_science_text(const uint8_t *packet, uint16_t length)
-{
-    return validate_science_mode_text_packet(packet, length, '5');
-}
-
-static text_packet_route_t classify_science_mode_text_packet(const uint8_t *packet,
-                                                             uint16_t length)
+static text_packet_route_t classify_text_packet(const uint8_t *packet,
+                                                uint16_t length)
 {
     if (validate_science_text(packet, length)) {
         return TEXT_PACKET_ROUTE_SCIENCE;
     }
 
-    if (validate_science_mode_rover_text(packet, length)) {
+    if (validate_rover_text(packet, length)) {
         return TEXT_PACKET_ROUTE_ROVER;
     }
 
@@ -774,8 +792,10 @@ static void enqueue_text_uplink_frame(frame_type_t type,
                                       uint16_t line_len)
 {
     uint8_t tx_frame[TX_FRAME_MAX_LEN];
+    const uint16_t line_ending_len =
+        (type == FRAME_TYPE_UPLINK_SCIENCE_TEXT) ? 1U : 2U;
 
-    if ((line_len + 2U) > sizeof(tx_frame)) {
+    if ((line_len + line_ending_len) > sizeof(tx_frame)) {
         LOG("[integrated] text uplink line too long len=%u\r\n",
             (unsigned int)line_len);
         note_uplink_frame_status(type, LINK_STAT_STATUS_OVERFLOW);
@@ -783,9 +803,14 @@ static void enqueue_text_uplink_frame(frame_type_t type,
     }
 
     memcpy(tx_frame, line, line_len);
-    tx_frame[line_len] = '\r';
-    tx_frame[line_len + 1U] = '\n';
-    enqueue_uplink_frame(type, tx_frame, (uint16_t)(line_len + 2U));
+    if (type == FRAME_TYPE_UPLINK_SCIENCE_TEXT) {
+        tx_frame[line_len] = '\n';
+    } else {
+        tx_frame[line_len] = '\r';
+        tx_frame[line_len + 1U] = '\n';
+    }
+    enqueue_uplink_frame(type, tx_frame,
+                         (uint16_t)(line_len + line_ending_len));
 }
 
 static void consume_rover_uplink_byte(uint8_t byte)
@@ -807,18 +832,13 @@ static void consume_rover_uplink_byte(uint8_t byte)
             return;
         }
 
-        valid_line =
-            (mode_control_get_module_mode() == MODULE_MODE_SCIENCE)
-                ? validate_science_mode_rover_text((const uint8_t *)g_router.rover_line,
-                                                   g_router.rover_line_len)
-                : validate_rover_text((const uint8_t *)g_router.rover_line,
-                                      g_router.rover_line_len);
+        valid_line = validate_rover_text((const uint8_t *)g_router.rover_line,
+                                         g_router.rover_line_len);
         if (valid_line) {
             enqueue_text_uplink_frame(FRAME_TYPE_UPLINK_ROVER,
                                       (const uint8_t *)g_router.rover_line,
                                       g_router.rover_line_len);
-        } else if ((mode_control_get_module_mode() == MODULE_MODE_SCIENCE) &&
-                   validate_science_text((const uint8_t *)g_router.rover_line,
+        } else if (validate_science_text((const uint8_t *)g_router.rover_line,
                                          g_router.rover_line_len)) {
             LOG("[integrated] science uplink packet on rover port len=%u\r\n",
                 (unsigned int)g_router.rover_line_len);
@@ -861,10 +881,14 @@ static void consume_rover_uplink_byte(uint8_t byte)
     g_router.rover_line[g_router.rover_line_len++] = (char)byte;
 }
 
-static void reset_module_uplink_parser(void)
+static void reset_arm_uplink_parser(void)
 {
     g_router.arm_packet_len = 0U;
     g_router.arm_rx_state = ARM_SYNC_WAIT;
+}
+
+static void reset_science_uplink_parser(void)
+{
     g_router.science_line_len = 0U;
     g_router.science_line_overflow = false;
 }
@@ -897,10 +921,9 @@ static void consume_science_uplink_byte(uint8_t byte)
             enqueue_text_uplink_frame(FRAME_TYPE_UPLINK_SCIENCE_TEXT,
                                       (const uint8_t *)g_router.science_line,
                                       g_router.science_line_len);
-        } else if (validate_science_mode_rover_text(
-                       (const uint8_t *)g_router.science_line,
-                       g_router.science_line_len)) {
-            LOG("[integrated] rover uplink packet on module port len=%u\r\n",
+        } else if (validate_rover_text((const uint8_t *)g_router.science_line,
+                                       g_router.science_line_len)) {
+            LOG("[integrated] rover uplink packet on science port len=%u\r\n",
                 (unsigned int)g_router.science_line_len);
             note_module_uplink_status(LINK_STAT_STATUS_WRONG_PORT);
         } else if ((g_router.science_line[0] == 'A') ||
@@ -943,11 +966,6 @@ static void consume_science_uplink_byte(uint8_t byte)
 
 static void consume_module_uplink_byte(uint8_t byte)
 {
-    if (mode_control_get_module_mode() == MODULE_MODE_SCIENCE) {
-        consume_science_uplink_byte(byte);
-        return;
-    }
-
     switch (g_router.arm_rx_state) {
     case ARM_SYNC_WAIT:
         if (byte == 'A') {
@@ -983,7 +1001,7 @@ static void consume_module_uplink_byte(uint8_t byte)
             g_router.arm_rx_state = ARM_SYNC_WAIT_JF_F;
         } else {
             note_module_uplink_status(LINK_STAT_STATUS_SYNC);
-            reset_module_uplink_parser();
+            reset_arm_uplink_parser();
         }
         break;
 
@@ -1000,7 +1018,7 @@ static void consume_module_uplink_byte(uint8_t byte)
             g_router.arm_rx_state = ARM_SYNC_WAIT_A_TYPE;
         } else {
             note_module_uplink_status(LINK_STAT_STATUS_SYNC);
-            reset_module_uplink_parser();
+            reset_arm_uplink_parser();
         }
         break;
 
@@ -1016,7 +1034,7 @@ static void consume_module_uplink_byte(uint8_t byte)
                     mode_control_get_module_name());
                 note_module_uplink_status(LINK_STAT_STATUS_CRC);
             }
-            reset_module_uplink_parser();
+            reset_arm_uplink_parser();
         }
         break;
 
@@ -1037,7 +1055,7 @@ static void consume_module_uplink_byte(uint8_t byte)
                     mode_control_get_module_name(), packet_type);
                 note_module_uplink_status(LINK_STAT_STATUS_CRC);
             }
-            reset_module_uplink_parser();
+            reset_arm_uplink_parser();
         }
         break;
     }
@@ -1048,12 +1066,12 @@ static void consume_module_uplink_byte(uint8_t byte)
             enqueue_arm_uplink_packet(FRAME_TYPE_UPLINK_ARM_JF,
                                       g_router.arm_packet,
                                       ARM_PACKET_JF_SIZE);
-            reset_module_uplink_parser();
+            reset_arm_uplink_parser();
         }
         break;
 
     default:
-        reset_module_uplink_parser();
+        reset_arm_uplink_parser();
         break;
     }
 }
@@ -1086,6 +1104,21 @@ static void poll_module_uplink_dma(void)
     }
 }
 
+static void poll_science_uplink_dma(void)
+{
+    const uint16_t dma_pos =
+        get_dma_position(&SCIENCE_UART, sizeof(g_router.science_rx_dma));
+
+    while (g_router.science_rx_pos != dma_pos) {
+        consume_science_uplink_byte(
+            g_router.science_rx_dma[g_router.science_rx_pos]);
+        g_router.science_rx_pos++;
+        if (g_router.science_rx_pos >= sizeof(g_router.science_rx_dma)) {
+            g_router.science_rx_pos = 0U;
+        }
+    }
+}
+
 static void reset_xbee_downlink_parser(void)
 {
     g_router.xbee_filter_mode = XBEE_FILTER_ROVER;
@@ -1108,9 +1141,9 @@ static void note_xbee_packet_rx(link_stat_port_t downlink_port)
     link_stats_note_status(downlink_port, LINK_STAT_STATUS_OK);
 }
 
-static void note_science_mode_downlink_status(const uint8_t *packet,
-                                              uint16_t len,
-                                              link_stat_status_t status)
+static void note_text_downlink_status(const uint8_t *packet,
+                                      uint16_t len,
+                                      link_stat_status_t status)
 {
     if ((len > 2U) &&
         (packet[0] == '0') &&
@@ -1129,72 +1162,47 @@ static void note_science_mode_downlink_status(const uint8_t *packet,
     note_downlink_status(status);
 }
 
-static void route_downlink_rover_packet(const uint8_t *packet, uint16_t len)
-{
-    uint8_t tx_frame[TX_FRAME_MAX_LEN];
-    tx_channel_t *tx_channel =
-        (mode_control_get_module_mode() == MODULE_MODE_ARM)
-            ? &g_router.module_out_tx
-            : &g_router.rover_out_tx;
-
-    if (!validate_rover_text(packet, len)) {
-        LOG("[integrated] rover downlink rejected len=%u\r\n", (unsigned int)len);
-        note_rover_downlink_status(LINK_STAT_STATUS_FORMAT);
-        return;
-    }
-
-    memcpy(tx_frame, packet, len);
-    tx_frame[len] = '\r';
-    tx_frame[len + 1U] = '\n';
-
-    if (!tx_channel_enqueue(tx_channel, FRAME_TYPE_DOWNLINK_ROVER,
-                            tx_frame, (uint16_t)(len + 2U))) {
-        LOG("[integrated] rover downlink tx queue full\r\n");
-        note_rover_downlink_status(LINK_STAT_STATUS_QUEUE_FULL);
-        report_error();
-        return;
-    }
-
-    note_xbee_packet_rx(LINK_STAT_ROVER_DOWNLINK);
-}
-
-static void route_downlink_science_mode_text_packet(const uint8_t *packet, uint16_t len)
+static void route_downlink_text_packet(const uint8_t *packet, uint16_t len)
 {
     uint8_t tx_frame[TX_FRAME_MAX_LEN];
     tx_channel_t *tx_channel;
     frame_type_t frame_type;
     text_packet_route_t route;
+    uint16_t line_ending_len;
 
-    route = classify_science_mode_text_packet(packet, len);
+    route = classify_text_packet(packet, len);
     if (route == TEXT_PACKET_ROUTE_NONE) {
-        LOG("[integrated] science-mode downlink rejected len=%u\r\n",
+        LOG("[integrated] text downlink rejected len=%u\r\n",
             (unsigned int)len);
-        note_science_mode_downlink_status(packet, len, LINK_STAT_STATUS_FORMAT);
+        note_text_downlink_status(packet, len, LINK_STAT_STATUS_FORMAT);
         return;
     }
 
-    if ((len + 2U) > sizeof(tx_frame)) {
-        LOG("[integrated] science-mode downlink too long len=%u\r\n",
+    line_ending_len =
+        (route == TEXT_PACKET_ROUTE_SCIENCE) ? 1U : 2U;
+    if ((len + line_ending_len) > sizeof(tx_frame)) {
+        LOG("[integrated] text downlink too long len=%u\r\n",
             (unsigned int)len);
-        note_science_mode_downlink_status(packet, len, LINK_STAT_STATUS_OVERFLOW);
+        note_text_downlink_status(packet, len, LINK_STAT_STATUS_OVERFLOW);
         return;
     }
 
     memcpy(tx_frame, packet, len);
-    tx_frame[len] = '\r';
-    tx_frame[len + 1U] = '\n';
 
     if (route == TEXT_PACKET_ROUTE_SCIENCE) {
-        tx_channel = &g_router.module_out_tx;
+        tx_frame[len] = '\n';
+        tx_channel = &g_router.science_out_tx;
         frame_type = FRAME_TYPE_DOWNLINK_SCIENCE_TEXT;
     } else {
-        tx_channel = &g_router.rover_out_tx;
+        tx_frame[len] = '\r';
+        tx_frame[len + 1U] = '\n';
+        tx_channel = &g_router.rover_module_out_tx;
         frame_type = FRAME_TYPE_DOWNLINK_ROVER;
     }
 
     if (!tx_channel_enqueue(tx_channel, frame_type, tx_frame,
-                            (uint16_t)(len + 2U))) {
-        LOG("[integrated] science-mode downlink tx queue full\r\n");
+                            (uint16_t)(len + line_ending_len))) {
+        LOG("[integrated] text downlink tx queue full\r\n");
         note_downlink_frame_status(frame_type, LINK_STAT_STATUS_QUEUE_FULL);
         report_error();
         return;
@@ -1207,8 +1215,9 @@ static void route_downlink_science_mode_text_packet(const uint8_t *packet, uint1
 
 static void route_downlink_arm_packet(const uint8_t *packet)
 {
-    if (!tx_channel_enqueue(&g_router.module_out_tx, FRAME_TYPE_DOWNLINK_ARM,
-                            packet, ARM_PACKET_JF_SIZE)) {
+    if (!tx_channel_enqueue(&g_router.rover_module_out_tx,
+                            FRAME_TYPE_DOWNLINK_ARM, packet,
+                            ARM_PACKET_JF_SIZE)) {
         LOG("[integrated] arm downlink tx queue full\r\n");
         note_module_downlink_status(LINK_STAT_STATUS_QUEUE_FULL);
         report_error();
@@ -1220,8 +1229,9 @@ static void route_downlink_arm_packet(const uint8_t *packet)
 
 static void route_downlink_uf_packet(const uint8_t *packet)
 {
-    if (!tx_channel_enqueue(&g_router.module_out_tx, FRAME_TYPE_DOWNLINK_UF,
-                            packet, UF_PACKET_V2_SIZE)) {
+    if (!tx_channel_enqueue(&g_router.rover_module_out_tx,
+                            FRAME_TYPE_DOWNLINK_UF, packet,
+                            UF_PACKET_V2_SIZE)) {
         LOG("[integrated] UF v2 downlink tx queue full\r\n");
         note_module_downlink_status(LINK_STAT_STATUS_QUEUE_FULL);
         report_error();
@@ -1427,24 +1437,19 @@ static void queue_xbee_uf_if_ready(void)
     g_router.xbee_filter_mode = XBEE_FILTER_ROVER;
 }
 
-static void queue_xbee_rover_if_ready(void)
+static void queue_xbee_text_if_ready(void)
 {
     if (g_router.xbee_rover_len == 0U) {
         return;
     }
 
-    if (mode_control_get_module_mode() == MODULE_MODE_SCIENCE) {
-        route_downlink_science_mode_text_packet(g_router.xbee_rover_buf,
-                                                g_router.xbee_rover_len);
-    } else {
-        route_downlink_rover_packet(g_router.xbee_rover_buf,
-                                    g_router.xbee_rover_len);
-    }
+    route_downlink_text_packet(g_router.xbee_rover_buf,
+                               g_router.xbee_rover_len);
 
     g_router.xbee_rover_len = 0U;
 }
 
-static void filter_xbee_science_payload_byte(uint8_t byte)
+static void filter_xbee_text_payload_byte(uint8_t byte)
 {
     if (byte == '\r') {
         return;
@@ -1457,7 +1462,7 @@ static void filter_xbee_science_payload_byte(uint8_t byte)
             return;
         }
 
-        queue_xbee_rover_if_ready();
+        queue_xbee_text_if_ready();
         return;
     }
 
@@ -1470,9 +1475,9 @@ static void filter_xbee_science_payload_byte(uint8_t byte)
         return;
     }
 
-    note_science_mode_downlink_status(g_router.xbee_rover_buf,
-                                      g_router.xbee_rover_len,
-                                      LINK_STAT_STATUS_OVERFLOW);
+    note_text_downlink_status(g_router.xbee_rover_buf,
+                              g_router.xbee_rover_len,
+                              LINK_STAT_STATUS_OVERFLOW);
     g_router.xbee_rover_len = 0U;
     g_router.xbee_text_overflow = true;
 }
@@ -1490,24 +1495,15 @@ static void append_rejected_xbee_sync_byte(uint8_t byte, bool sync_only)
     }
 
     if (g_router.xbee_rover_len > 0U) {
-        if (mode_control_get_module_mode() == MODULE_MODE_SCIENCE) {
-            note_science_mode_downlink_status(g_router.xbee_rover_buf,
-                                              g_router.xbee_rover_len,
-                                              LINK_STAT_STATUS_OVERFLOW);
-            g_router.xbee_rover_len = 0U;
-            return;
-        }
-
+        note_text_downlink_status(g_router.xbee_rover_buf,
+                                  g_router.xbee_rover_len,
+                                  LINK_STAT_STATUS_OVERFLOW);
         g_router.xbee_rover_len = 0U;
-        note_rover_downlink_status(LINK_STAT_STATUS_OVERFLOW);
     }
 }
 
 static void filter_xbee_payload_byte(uint8_t byte)
 {
-    const bool is_arm_mode =
-        (mode_control_get_module_mode() == MODULE_MODE_ARM);
-
     if (g_router.xbee_filter_mode == XBEE_FILTER_ARM) {
         g_router.xbee_arm_buf[g_router.xbee_arm_len++] = byte;
         queue_xbee_arm_if_ready();
@@ -1540,7 +1536,7 @@ static void filter_xbee_payload_byte(uint8_t byte)
         g_router.xbee_rover_pending_u = false;
         g_router.xbee_rover_pending_u_sync_only = false;
 
-        if (is_arm_mode && (byte == 'F')) {
+        if (byte == 'F') {
             start_xbee_uf_packet();
             return;
         }
@@ -1554,38 +1550,13 @@ static void filter_xbee_payload_byte(uint8_t byte)
         return;
     }
 
-    if (is_arm_mode && (byte == 'U')) {
+    if (byte == 'U') {
         g_router.xbee_rover_pending_u = true;
         g_router.xbee_rover_pending_u_sync_only = false;
         return;
     }
 
-    if (!is_arm_mode) {
-        filter_xbee_science_payload_byte(byte);
-        return;
-    }
-
-    if (byte == '\n') {
-        queue_xbee_rover_if_ready();
-        return;
-    }
-
-    if (byte == '\r') {
-        return;
-    }
-
-    if ((g_router.xbee_rover_len == 0U) && (byte != '0')) {
-        note_downlink_status(LINK_STAT_STATUS_FORMAT);
-        return;
-    }
-
-    if (g_router.xbee_rover_len < ROVER_PACKET_MAX_LEN) {
-        g_router.xbee_rover_buf[g_router.xbee_rover_len++] = byte;
-        return;
-    }
-
-    g_router.xbee_rover_len = 0U;
-    note_rover_downlink_status(LINK_STAT_STATUS_OVERFLOW);
+    filter_xbee_text_payload_byte(byte);
 }
 
 static void process_xbee_input_byte(uint8_t byte)
@@ -1659,7 +1630,7 @@ static void sync_modes(void)
 
     if (module_mode != g_router.module_mode) {
         g_router.module_mode = module_mode;
-        reset_module_uplink_parser();
+        reset_arm_uplink_parser();
         reset_xbee_downlink_parser();
         LOG("[integrated] router module mode -> %s\r\n",
             mode_control_get_module_name());
@@ -1683,12 +1654,13 @@ void data_router_init(void)
     g_router.module_mode = mode_control_get_module_mode();
     g_router.xbee_mode = mode_control_get_xbee_mode();
     g_router.mode_generation = mode_control_get_generation();
-    reset_module_uplink_parser();
+    reset_arm_uplink_parser();
+    reset_science_uplink_parser();
     reset_xbee_downlink_parser();
 
     tx_channel_init(&g_router.xbee_tx, NULL);
-    tx_channel_init(&g_router.rover_out_tx, &ROVER_OUT_UART);
-    tx_channel_init(&g_router.module_out_tx, &MODULE_OUT_UART);
+    tx_channel_init(&g_router.rover_module_out_tx, &MODULE_OUT_UART);
+    tx_channel_init(&g_router.science_out_tx, &SCIENCE_UART);
 
     if (start_circular_reception(&ROVER_IN_UART, g_router.rover_rx_dma,
                                  sizeof(g_router.rover_rx_dma)) != HAL_OK) {
@@ -1698,6 +1670,12 @@ void data_router_init(void)
 
     if (start_circular_reception(&MODULE_IN_UART, g_router.module_rx_dma,
                                  sizeof(g_router.module_rx_dma)) != HAL_OK) {
+        report_error();
+        Error_Handler();
+    }
+
+    if (start_circular_reception(&SCIENCE_UART, g_router.science_rx_dma,
+                                 sizeof(g_router.science_rx_dma)) != HAL_OK) {
         report_error();
         Error_Handler();
     }
@@ -1727,6 +1705,7 @@ void data_router_poll(void)
 
     poll_rover_uplink_dma();
     poll_module_uplink_dma();
+    poll_science_uplink_dma();
     poll_xbee_dma(&EXTERNAL_XBEE_UART, g_router.xbee3_rx_dma,
                   &g_router.xbee3_rx_pos, sizeof(g_router.xbee3_rx_dma),
                   active_xbee_uart == &EXTERNAL_XBEE_UART);
@@ -1735,8 +1714,8 @@ void data_router_poll(void)
                   active_xbee_uart == &ONBOARD_XBEE_UART);
 
     tx_channel_pump(&g_router.xbee_tx, active_xbee_uart);
-    tx_channel_pump(&g_router.rover_out_tx, NULL);
-    tx_channel_pump(&g_router.module_out_tx, NULL);
+    tx_channel_pump(&g_router.rover_module_out_tx, NULL);
+    tx_channel_pump(&g_router.science_out_tx, NULL);
 }
 
 void data_router_on_uart_rx_complete(UART_HandleTypeDef *huart)
@@ -1750,11 +1729,11 @@ void data_router_on_uart_tx_complete(UART_HandleTypeDef *huart)
         return;
     }
 
-    if (tx_channel_on_complete(&g_router.rover_out_tx, huart)) {
+    if (tx_channel_on_complete(&g_router.rover_module_out_tx, huart)) {
         return;
     }
 
-    (void)tx_channel_on_complete(&g_router.module_out_tx, huart);
+    (void)tx_channel_on_complete(&g_router.science_out_tx, huart);
 }
 
 void data_router_on_uart_error(UART_HandleTypeDef *huart)
@@ -1773,10 +1752,19 @@ void data_router_on_uart_error(UART_HandleTypeDef *huart)
     }
 
     if (huart == &MODULE_IN_UART) {
-        reset_module_uplink_parser();
+        reset_arm_uplink_parser();
         restart_circular_reception(&MODULE_IN_UART, g_router.module_rx_dma,
                                    sizeof(g_router.module_rx_dma),
                                    &g_router.module_rx_pos);
+        return;
+    }
+
+    if (huart == &SCIENCE_UART) {
+        (void)tx_channel_on_error(&g_router.science_out_tx, huart);
+        reset_science_uplink_parser();
+        restart_circular_reception(&SCIENCE_UART, g_router.science_rx_dma,
+                                   sizeof(g_router.science_rx_dma),
+                                   &g_router.science_rx_pos);
         return;
     }
 
@@ -1798,9 +1786,5 @@ void data_router_on_uart_error(UART_HandleTypeDef *huart)
         return;
     }
 
-    if (tx_channel_on_error(&g_router.rover_out_tx, huart)) {
-        return;
-    }
-
-    (void)tx_channel_on_error(&g_router.module_out_tx, huart);
+    (void)tx_channel_on_error(&g_router.rover_module_out_tx, huart);
 }
